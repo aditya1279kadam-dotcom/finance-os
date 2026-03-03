@@ -10,7 +10,16 @@
 </head>
 
 <body>
+    <div class="sidebar-overlay"
+        onclick="document.querySelector('.sidebar').classList.remove('open'); document.querySelector('.sidebar-overlay').classList.remove('open');">
+    </div>
     <aside class="sidebar">
+        <button class="close-sidebar"
+            onclick="document.querySelector('.sidebar').classList.remove('open'); document.querySelector('.sidebar-overlay').classList.remove('open');">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+        </button>
         <div class="logo">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="url(#logo-grad)" stroke-width="3"
                 stroke-linecap="round" stroke-linejoin="round">
@@ -55,9 +64,17 @@
 
     <main class="main-content">
         <header class="page-header">
-            <div>
-                <h1>Executive Analytics</h1>
-                <p>Enterprise Profitability & Margin Performance Ledger</p>
+            <div style="display: flex; gap: 16px; align-items: flex-start;">
+                <button class="mobile-nav-toggle"
+                    onclick="document.querySelector('.sidebar').classList.add('open'); document.querySelector('.sidebar-overlay').classList.add('open');">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 12h18M3 6h18M3 18h18" />
+                    </svg>
+                </button>
+                <div>
+                    <h1>Executive Analytics</h1>
+                    <p>Enterprise Profitability & Margin Performance Ledger</p>
+                </div>
             </div>
             <div style="display: flex; gap: 12px; align-items: center;">
                 <button id="clearDataBtn" class="btn-ghost"
