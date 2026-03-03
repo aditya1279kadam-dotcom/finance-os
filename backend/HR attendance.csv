@@ -1,0 +1,16 @@
+﻿Employee Name,Roaster Date,First Half,Second Half
+Alice,01-03-2026,P,P
+Alice,02-03-2026,A,A
+Alice,03-03-2026,P,A
+Alice,04-03-2026,WFH,WFH
+Alice,05-03-2026,P,P
+Bob,01-03-2026,P,P
+Bob,02-03-2026,P,A
+Bob,03-03-2026,O,O
+Bob,04-03-2026,P,P
+Bob,05-03-2026,A,A
+Charlie,01-03-2026,WFH,WFH
+Charlie,02-03-2026,P,P
+Charlie,03-03-2026,OD,P
+Charlie,04-03-2026,H,H
+Charlie,05-03-2026,P,A

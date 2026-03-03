@@ -1,0 +1,470 @@
+const express = require('express');
+const axios = require('axios');
+const dotenv = require('dotenv');
+const cors = require('cors');
+const path = require('path');
+const multer = require('multer');
+const Papa = require('papaparse');
+const fs = require('fs');
+const xlsx = require('xlsx');
+const pptxgen = require('pptxgenjs');
+const stringSimilarity = require('string-similarity');
+const financeEngine = require('./finance-engine');
+const resourceEngine = require('./resource-engine');
+
+dotenv.config();
+
+const APP_VERSION = "v1.2.2 (Emergency Route Patch)";
+const app = express();
+const PORT = process.env.PORT || 3001;
+const upload = multer({ dest: 'uploads/' });
+
+// In-memory state for POC (Session-like)
+let projectState = {
+    jiraDump: [],
+    rateCard: [],
+    resourceList: [],
+    projectMaster: [],
+    overheadPool: [],
+    attendanceHR: [] // Defensive fallback key
+};
+
+// In-memory state for Resource Report
+let attendanceState = {
+    summary: [],
+    matchingReport: [],
+    qcFlags: [],
+    rawData: []
+};
+
+app.use(cors());
+app.use(express.json());
+
+// Request Logger for Debugging
+app.use((req, res, next) => {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+    next();
+});
+
+// Metadata Persistence (Categories, etc.)
+const METADATA_FILE = path.join(__dirname, 'metadata.json');
+
+// REST API Endpoints
+app.get('/api/metadata', (req, res) => {
+    console.log('-> Handling GET /api/metadata');
+    try {
+        if (!fs.existsSync(METADATA_FILE)) {
+            fs.writeFileSync(METADATA_FILE, JSON.stringify({ categories: ["Implementation", "Support", "Consulting"] }, null, 4));
+        }
+        const data = fs.readFileSync(METADATA_FILE, 'utf8');
+        res.json(JSON.parse(data));
+    } catch (err) {
+        console.error('Metadata Read Error:', err);
+        res.status(500).json({ error: 'Failed to read metadata' });
+    }
+});
+
+app.post('/api/metadata', (req, res) => {
+    console.log('-> Handling POST /api/metadata');
+    try {
+        const newMetadata = req.body;
+        fs.writeFileSync(METADATA_FILE, JSON.stringify(newMetadata, null, 4));
+        res.json({ success: true, metadata: newMetadata });
+    } catch (err) {
+        console.error('Metadata Save Error:', err);
+        res.status(500).json({ error: 'Failed to save metadata' });
+    }
+});
+
+app.get('/api/ping', (req, res) => res.json({ status: 'pong', version: APP_VERSION }));
+
+// Resource Ingestion Endpoint (HR Attendance Raw)
+app.post('/api/upload/attendance', upload.single('file'), (req, res) => {
+    console.log(`[DEBUG] Attendance Route Hit: /api/upload/attendance`);
+    try {
+        const filePath = req.file.path;
+        let rows = [];
+
+        if (req.file.originalname.toLowerCase().endsWith('.csv')) {
+            const content = fs.readFileSync(filePath, 'utf8');
+            rows = Papa.parse(content, {
+                header: true,
+                skipEmptyLines: 'greedy',
+                transformHeader: h => h.trim().toLowerCase().replace(/\s+/g, '')
+            }).data;
+        } else {
+            const workbook = xlsx.readFile(filePath);
+            const sheetName = workbook.SheetNames[0];
+            rows = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+        }
+
+        fs.unlinkSync(filePath); // Cleanup
+
+        if (!rows || !rows.length) return res.status(400).json({ error: "File is empty or could not be parsed. Please check if it is a valid CSV/Excel file." });
+
+        // Validate Columns (Case-Insensitive and space-robust)
+        const firstRow = rows[0];
+        const keys = Object.keys(firstRow);
+
+        console.log(`[DEBUG] Attendance CSV Upload: Found keys: ${keys.join(', ')}`);
+
+        // Check for required columns with flexible spelling for Roster Date
+        const hasEmployee = keys.includes('employeename');
+        const hasDate = keys.includes('rosterdate') || keys.includes('roasterdate') || keys.includes('date');
+        const hasFirstHalf = keys.includes('firsthalf');
+        const hasSecondHalf = keys.includes('secondhalf');
+
+        const missing = [];
+        if (!hasEmployee) missing.push('employeename');
+        if (!hasDate) missing.push('rosterdate (or roasterdate)');
+        if (!hasFirstHalf) missing.push('firsthalf');
+        if (!hasSecondHalf) missing.push('secondhalf');
+
+        if (missing.length) {
+            return res.status(400).json({
+                error: `Missing required columns: ${missing.join(', ')}`,
+                foundColumns: keys,
+                tip: "Please ensure your CSV has headers: Employee Name, Roster Date, First Half, Second Half."
+            });
+        }
+
+        // Helper to match case-insensitive with Roaster/Roster flexibility
+        const getVal = (row, key) => {
+            if (key === 'rosterdate') {
+                const match = Object.keys(row).find(k => k === 'rosterdate' || k === 'roasterdate' || k === 'date');
+                return match ? row[match] : undefined;
+            }
+            const match = Object.keys(row).find(k => k.toLowerCase() === key.toLowerCase());
+            return match ? row[match] : undefined;
+        };
+
+        const allowedCodes = ['P', 'A', 'O', 'H', 'OD', 'WFH'];
+        const qcFlags = [];
+        const employeeData = {};
+
+        rows.forEach((row, idx) => {
+            const name = (getVal(row, 'employeename') || '').trim();
+            const date = getVal(row, 'rosterdate');
+            let fh = (getVal(row, 'firsthalf') || '').toString().toUpperCase().trim();
+            let sh = (getVal(row, 'secondhalf') || '').toString().toUpperCase().trim();
+
+            if (!name) return;
+
+            // Handle data issues
+            if (!allowedCodes.includes(fh) || !fh) {
+                qcFlags.push(`Row ${idx + 2}: FirstHalf='${fh || 'Empty'}' - unknown code - treated as P`);
+                fh = 'P';
+            }
+            if (!allowedCodes.includes(sh) || !sh) {
+                qcFlags.push(`Row ${idx + 2}: SecondHalf='${sh || 'Empty'}' - unknown code - treated as P`);
+                sh = 'P';
+            }
+
+            let dayLeave = 0;
+            if (fh === 'A' && sh === 'A') dayLeave = 1.0;
+            else if (fh === 'A' || sh === 'A') dayLeave = 0.5;
+
+            if (!employeeData[name]) {
+                employeeData[name] = {
+                    ResourceName: name,
+                    ActualLeaveDays: 0,
+                    RawRowsCount: 0,
+                    FlaggedRows: 0
+                };
+            }
+
+            employeeData[name].ActualLeaveDays += dayLeave;
+            employeeData[name].RawRowsCount += 1;
+            // Note: FlaggedRows could count rows with unknown codes
+        });
+
+        // Name Normalization Function
+        const normalize = (name) => {
+            return name.toLowerCase()
+                .trim()
+                .replace(/\s+/g, ' ')
+                .replace(/[.,]/g, '')
+                .replace(/\b(mr|mrs|ms|dr)\b/gi, '')
+                .trim();
+        };
+
+        // Name Matching Logic
+        const hrNames = Object.keys(employeeData);
+        const jiraResources = projectState.resourceList.map(r => ({
+            original: r['Jira Name'] || r['Name'] || '',
+            normalized: normalize(r['Jira Name'] || r['Name'] || '')
+        })).filter(r => r.original);
+
+        const matchingReport = [];
+        const finalAttendanceSummary = [];
+
+        hrNames.forEach(hrName => {
+            const normHR = normalize(hrName);
+            const hrInfo = employeeData[hrName];
+
+            // Exact Match
+            let match = jiraResources.find(j => j.normalized === normHR);
+            let matchType = 'Unmatched';
+            let matchedName = null;
+            let score = 0;
+
+            if (match) {
+                matchType = 'Exact';
+                matchedName = match.original;
+                score = 1.0;
+            } else if (jiraResources.length > 0) {
+                // Fuzzy Match
+                const results = stringSimilarity.findBestMatch(normHR, jiraResources.map(j => j.normalized));
+                score = results.bestMatch.rating;
+                if (score >= 0.90) {
+                    match = jiraResources[results.bestMatchIndex];
+                    matchType = 'Fuzzy (Auto)';
+                    matchedName = match.original;
+                } else if (score >= 0.75) {
+                    match = jiraResources[results.bestMatchIndex];
+                    matchType = 'Fuzzy (Review Required)';
+                    matchedName = match.original;
+                }
+            }
+
+            matchingReport.push({
+                HRName: hrName,
+                MatchedNameInJira: matchedName,
+                MatchType: matchType,
+                Score: (score * 100).toFixed(0) + '%'
+            });
+
+            finalAttendanceSummary.push({
+                ...hrInfo,
+                MatchedName: matchedName,
+                ActualLeaveHours: hrInfo.ActualLeaveDays * 8
+            });
+        });
+
+        attendanceState = {
+            summary: finalAttendanceSummary,
+            matchingReport,
+            qcFlags,
+            rawData: rows
+        };
+
+        const unmatchedNames = matchingReport.filter(m => m.MatchType === 'Unmatched').map(m => m.HRName);
+
+        res.json({
+            success: true,
+            rowCount: rows.length,
+            resourceCount: hrNames.length,
+            unmatchedCount: unmatchedNames.length,
+            unmatchedNames: unmatchedNames,
+            qcCount: qcFlags.length,
+            qcExamples: qcFlags.slice(0, 5) // Send top 5 QC issues to the frontend
+        });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Attendance Parse Error', details: err.message });
+    }
+});
+
+// File Ingestion Endpoint
+app.post('/api/upload/:type', upload.single('file'), (req, res) => {
+    const { type } = req.params;
+    console.log(`[DEBUG] Generic Upload Route Hit: type='${type}'`);
+
+    // Defensive Fallback: If attendance is misrouted here, tell the user
+    if (type === 'attendance' || type === 'attendanceHR') {
+        return res.status(400).json({
+            error: `Routing Error: Attendance file hit the generic route for '${type}'.`,
+            tip: "Try refreshing your browser (Ctrl+F5) and restarting the server."
+        });
+    }
+
+    if (!projectState.hasOwnProperty(type)) {
+        return res.status(400).json({ error: `Invalid data type: [${type}]. Please check your frontend code.` });
+    }
+
+    try {
+        const filePath = req.file.path;
+        let data = [];
+
+        if (req.file.originalname.toLowerCase().endsWith('.csv')) {
+            const fileContent = fs.readFileSync(filePath, 'utf8');
+            const result = Papa.parse(fileContent, {
+                header: true,
+                skipEmptyLines: 'greedy',
+                dynamicTyping: true
+            });
+            data = result.data;
+        } else {
+            const workbook = xlsx.readFile(filePath);
+            const sheetName = workbook.SheetNames[0];
+            data = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+        }
+
+        projectState[type] = data;
+        fs.unlinkSync(filePath); // Cleanup
+
+        res.json({
+            success: true,
+            rowCount: data.length,
+            preview: data.slice(0, 5)
+        });
+    } catch (err) {
+        console.error(`Upload Error [${type}]:`, err);
+        res.status(500).json({ error: 'File Parse Error', details: err.message });
+    }
+});
+
+// Calculate Report Endpoint
+app.get('/api/calculate', (req, res) => {
+    try {
+        console.log(`[DEBUG] /api/calculate triggered.`);
+        console.log(`[DEBUG] Current projectState size: Jira: ${projectState.jiraDump?.length || 0}, Rates: ${projectState.rateCard?.length || 0}, Resources: ${projectState.resourceList?.length || 0}`);
+        const results = financeEngine.process(projectState);
+        res.json(results);
+    } catch (err) {
+        console.error(`[DEBUG] /api/calculate Error:`, err);
+        res.status(500).json({ error: 'Calculation failed', details: err.message });
+    }
+});
+
+// Resource Calculation Endpoint
+app.get('/api/calculate-resource', async (req, res) => {
+    try {
+        console.log(`[DEBUG] /api/calculate-resource triggered.`);
+
+        // Use SHARED state
+        const inputData = {
+            JiraDump: projectState.jiraDump,
+            ResourceMaster: projectState.resourceList, // Linked to existing upload
+            AttendanceSummary: attendanceState.summary,
+            MatchingReport: attendanceState.matchingReport,
+            AttendanceQC: attendanceState.qcFlags
+        };
+
+        console.log(`[DEBUG] Resource Report Input Data Size: Jira: ${inputData.JiraDump?.length || 0}, ResourceMaster: ${inputData.ResourceMaster?.length || 0}, AttendanceSummary: ${inputData.AttendanceSummary?.length || 0}`);
+
+        const results = resourceEngine.process(inputData);
+
+        // Save Excel logic
+        const dateStr = new Date().toISOString().replace(/T.*/, '').replace(/-/g, '');
+        const wb = xlsx.utils.book_new();
+
+        // Build Excel Output Data
+        const outData = results.reportData.map(r => ({
+            ResourceName: r.ResourceName,
+            RequiredHours: r.RequiredHours,
+            ExternalHours: r.ExternalHours,
+            InternalHours: r.InternalHours,
+            CAAPL_Hours: r.CAAPL_Hours,
+            LND_Hours: r.LND_Hours,
+            Sales_Hours: r.Sales_Hours,
+            Leaves_Hours_Jira: r.Leaves_Hours_Jira,
+            Leaves_Days_Jira: r.Leaves_Days_Jira,
+            ActualLeaveDays: r.ActualLeaveDays,
+            Leaves_Hours_Final: r.Leaves_Hours_Final,
+            Bench_Hours_Jira: r.Bench_Hours_Jira,
+            AdjustedBench: r.AdjustedBench,
+            FinalBench: r.FinalBench,
+            TotalAllocated: r.TotalAllocated,
+            CrossCheckDelta: r.CrossCheckDelta,
+            'ExternalProductivity%': r.ExternalProductivity !== null ? (r.ExternalProductivity * 100).toFixed(2) + '%' : 'NA',
+            'InternalProductivity%': r.InternalProductivity !== null ? (r.InternalProductivity * 100).toFixed(2) + '%' : 'NA',
+            'Bench%': r.BenchPercent !== null ? (r.BenchPercent * 100).toFixed(2) + '%' : 'NA',
+            'OverallBillability%': r.OverallBillability !== null ? (r.OverallBillability * 100).toFixed(2) + '%' : 'NA'
+        }));
+
+        const wsResource = xlsx.utils.json_to_sheet(outData);
+        xlsx.utils.book_append_sheet(wb, wsResource, "ResourceBillability");
+
+        const qcDataStr = [
+            ...results.qcReport.missingSheets.map(s => `Missing Sheet: ${s}`),
+            ...results.qcReport.missingRequiredHours.map(n => `Resource ${n}: RequiredHours missing`),
+            ...results.qcReport.unknownCategories.map(c => `Unknown Project Category: ${c}`),
+            ...results.qcReport.denominatorIssues.map(n => `Resource ${n}: RequiredHours - Leaves <= 0 (NA percentages)`),
+            ...results.qcReport.failedCrossChecks.map(f => `Resource ${f.name}: Failed Cross-Check (Delta: ${f.delta.toFixed(2)})`),
+            ...attendanceState.qcFlags,
+            ...attendanceState.matchingReport.filter(m => m.MatchType.includes('Review') || m.MatchType === 'Unmatched').map(m => `Name Match: ${m.HRName} matched to ${m.MatchedNameInJira || 'None'} (${m.MatchType} - Score: ${m.Score})`)
+        ].map(s => ({ Flag: s }));
+
+        const wsQC = xlsx.utils.json_to_sheet(qcDataStr);
+        xlsx.utils.book_append_sheet(wb, wsQC, "QC_Report");
+
+        xlsx.utils.book_append_sheet(wb, xlsx.utils.json_to_sheet(attendanceState.summary), "AttendanceSummary");
+        xlsx.utils.book_append_sheet(wb, xlsx.utils.json_to_sheet(attendanceState.matchingReport), "MatchingReport");
+
+        const excelPath = path.join(__dirname, 'uploads', `ResourceBillability_${dateStr}.xlsx`);
+        xlsx.writeFile(wb, excelPath);
+
+        // Generate PPTX
+        const pptx = new pptxgen();
+        const slide = pptx.addSlide();
+
+        slide.addText(`Resource-Wise Billability — ${dateStr}`, { x: 0.5, y: 0.5, fontSize: 24, bold: true });
+
+        slide.addText('Avg Overall Billability', { x: 0.5, y: 1.5, fontSize: 12, color: '666666' });
+        slide.addText(`${(results.summary.AvgOverallBillability * 100).toFixed(2)}%`, { x: 0.5, y: 1.8, fontSize: 32, bold: true, color: '003366' });
+
+        slide.addText('Avg External Prod', { x: 3.0, y: 1.5, fontSize: 12, color: '666666' });
+        slide.addText(`${(results.summary.AvgExternalProductivity * 100).toFixed(2)}%`, { x: 3.0, y: 1.8, fontSize: 32, bold: true, color: '003366' });
+
+        slide.addText('Avg Internal Prod', { x: 5.5, y: 1.5, fontSize: 12, color: '666666' });
+        slide.addText(`${(results.summary.AvgInternalProductivity * 100).toFixed(2)}%`, { x: 5.5, y: 1.8, fontSize: 32, bold: true, color: '003366' });
+
+        slide.addText('Avg Bench', { x: 8.0, y: 1.5, fontSize: 12, color: '666666' });
+        slide.addText(`${(results.summary.AvgBench * 100).toFixed(2)}%`, { x: 8.0, y: 1.8, fontSize: 32, bold: true, color: 'cc0000' });
+
+        const pptxPath = path.join(__dirname, 'uploads', `ResourceBillability_Summary_${dateStr}.pptx`);
+        await pptx.writeFile({ fileName: pptxPath });
+
+        results.exportFiles = {
+            excel: `/uploads/ResourceBillability_${dateStr}.xlsx`,
+            pptx: `/uploads/ResourceBillability_Summary_${dateStr}.pptx`
+        };
+
+        res.json(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Calculation failed', details: err.message });
+    }
+});
+
+// Clear Data Endpoint
+app.post('/api/clear', (req, res) => {
+    projectState = {
+        jiraDump: [],
+        rateCard: [],
+        resourceList: [],
+        projectMaster: [],
+        overheadPool: []
+    };
+    res.json({ success: true, message: 'All data cleared' });
+});
+
+// Jira Proxy Endpoint
+app.get('/api/jira/worklogs', async (req, res) => {
+    const { JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN } = process.env;
+    if (!JIRA_URL || !JIRA_EMAIL || !JIRA_API_TOKEN) {
+        return res.status(500).json({ error: 'Jira configuration missing' });
+    }
+    try {
+        const auth = Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64');
+        const response = await axios.get(`${JIRA_URL}/rest/api/3/search`, {
+            params: req.query,
+            headers: { 'Authorization': `Basic ${auth}`, 'Accept': 'application/json' }
+        });
+        res.json(response.data);
+    } catch (error) {
+        res.status(500).json({ error: 'Jira API Error' });
+    }
+});
+
+// Static Files (Serve after API routes)
+// static serving removed - frontend is now in a separate Vite app
+
+app.listen(PORT, () => {
+    console.log(`----------------------------------------`);
+    console.log(`FinanceOS Backend: ${APP_VERSION}`);
+    console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`----------------------------------------`);
+});
