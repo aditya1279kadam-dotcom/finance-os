@@ -1,1 +1,251 @@
-/* You can add global styles to this file, and also import other style files */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-dark: #0f111a;
+  --bg-panel: #1e2133;
+  --border: #2e334a;
+  --text-primary: #f8fafc;
+  --text-muted: #94a3b8;
+  --accent-gold: transparent; /* No longer using gold */
+  --accent-blue: transparent;
+  --hover-highlight: rgba(129, 140, 248, 0.1);
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background-color: var(--bg-dark);
+  color: var(--text-primary);
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4, .outfit-font {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.kpi-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-top: 24px;
+}
+
+.kpi-panel {
+  flex: 1;
+  min-width: 250px;
+  background-color: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 24px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  transition: transform 0.2s ease;
+}
+
+.kpi-panel:hover {
+  transform: translateY(-2px);
+  border-color: rgba(129, 140, 248, 0.5); /* subtle accent on hover */
+}
+
+.kpi-panel .tag {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.kpi-panel .amount {
+  font-size: 2.2rem;
+  font-weight: 700;
+  font-family: 'Outfit', sans-serif;
+  color: #fff;
+  margin-bottom: 6px;
+}
+
+.kpi-panel .growth {
+  font-size: 0.85rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Base button replacing btn-gold */
+.btn-gold {
+  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: 'Inter', sans-serif;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+.btn-gold:hover {
+  background: linear-gradient(135deg, #818cf8 0%, #6366f1 100%);
+  transform: translateY(-1px);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  padding: 10px 20px;
+  border-radius: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--text-muted);
+}
+
+.glass-panel {
+  background: rgba(30, 33, 51, 0.7);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 24px;
+  padding: 24px;
+  margin-bottom: 24px; /* Default margin, adjust when nesting */
+}
+
+/* Category cards grid */
+.category-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 24px;
+}
+
+.data-table-container {
+  background-color: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  overflow: hidden;
+}
+
+.compact-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.compact-table th {
+  background-color: rgba(0, 0, 0, 0.2);
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  padding: 16px 20px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.compact-table td {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.compact-table tbody tr:hover {
+  background-color: var(--hover-highlight);
+}
+
+/* Utility Badges */
+.badge-pill {
+    padding: 4px 8px;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+.margin-excellent { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+.margin-good { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+.margin-warning { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+.margin-danger { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+
+.status-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+.status-dot.active { background-color: var(--success); }
+.status-dot.closed { background-color: var(--text-muted); }
+
+/* Sidebar Layout Core */
+.app-layout {
+  display: flex;
+  min-height: 100vh;
+}
+.sidebar-wrapper {
+  transition: width 0.3s ease;
+  flex-shrink: 0;
+}
+.main-content {
+  flex-grow: 1;
+  padding: 32px 48px;
+  max-width: 1600px; /* Optional max-width for very wide screens */
+  margin: 0 auto;
+}
+
+/* Filters */
+.filter-bar {
+  display: flex;
+  gap: 16px;
+  margin-top: 32px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 180px;
+}
+
+.filter-group label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.filter-group select, .filter-group input {
+  background-color: rgba(0, 0, 0, 0.2);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 10px 16px;
+  border-radius: 12px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  outline: none;
+  transition: border-color 0.2s;
+  font-family: inherit;
+}
+
+.filter-group select:focus, .filter-group input:focus {
+  border-color: #818cf8;
+}
