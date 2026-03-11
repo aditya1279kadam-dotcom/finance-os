@@ -1,4 +1,5 @@
-Name,Jira Name,Required Hours (Formula)
-Alice,Alice,176
-Bob,Bob,176
-Charlie,Charlie,176
+Name,Jira Name,Date of Joining,Date of Seperation
+Alice,Alice,01-09-2025,
+Bob,Bob,03-12-2025,
+Charlie,Charlie,01-04-2024,
+Max,max,06-09-2025,01-12-2025

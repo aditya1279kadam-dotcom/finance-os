@@ -17,7 +17,11 @@ dotenv.config();
 const APP_VERSION = "v1.2.2 (Emergency Route Patch)";
 const app = express();
 const PORT = process.env.PORT || 3001;
-const upload = multer({ dest: 'uploads/' });
+
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
+
+const upload = multer({ dest: uploadDir });
 
 // In-memory state for POC (Session-like)
 let projectState = {
@@ -83,6 +87,7 @@ app.get('/api/ping', (req, res) => res.json({ status: 'pong', version: APP_VERSI
 app.post('/api/upload/attendance', upload.single('file'), (req, res) => {
     console.log(`[DEBUG] Attendance Route Hit: /api/upload/attendance`);
     try {
+        if (!req.file) return res.status(400).json({ error: 'No file uploaded or file could not be parsed.' });
         const filePath = req.file.path;
         let rows = [];
 
@@ -287,6 +292,7 @@ app.post('/api/upload/:type', upload.single('file'), (req, res) => {
     }
 
     try {
+        if (!req.file) return res.status(400).json({ error: 'No file uploaded or file could not be parsed.' });
         const filePath = req.file.path;
         let data = [];
 

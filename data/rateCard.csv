@@ -1,4 +1,5 @@
-Name,Jira Name,Monthly Salary
-Alice,Alice,80000
-Bob,Bob,60000
-Charlie,Charlie,120000
+Name,Jira Name,Function,Monthly Salary
+Alice,Alice,Product,80000
+Bob,Bob,Technology,60000
+Charlie,Charlie,Technology,120000
+Max,Max,Admin,30000
