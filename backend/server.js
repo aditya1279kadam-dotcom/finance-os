@@ -26,7 +26,8 @@ let projectState = {
     resourceList: [],
     projectMaster: [],
     overheadPool: [],
-    attendanceHR: [] // Defensive fallback key
+    attendanceHR: [], // Defensive fallback key
+    lastRefreshed: null
 };
 
 // In-memory state for Resource Report
@@ -245,8 +246,10 @@ app.post('/api/upload/attendance', upload.single('file'), (req, res) => {
             summary: finalAttendanceSummary,
             matchingReport,
             qcFlags,
-            rawData: rows
+            filteredRaw: rows
         };
+
+        projectState.lastRefreshed = new Date().toISOString();
 
         const unmatchedNames = matchingReport.filter(m => m.MatchType === 'Unmatched').map(m => m.HRName);
 
@@ -301,7 +304,35 @@ app.post('/api/upload/:type', upload.single('file'), (req, res) => {
             data = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
         }
 
+        if (data && data.length > 0) {
+            const firstRow = data[0];
+            const keys = Object.keys(firstRow).map(k => String(k).trim().toLowerCase());
+            const missing = [];
+
+            if (type === 'jiraDump') {
+                if (!keys.includes('author')) missing.push('Author');
+                if (!keys.includes('issue')) missing.push('Issue');
+                if (!keys.some(k => k.includes('time spent'))) missing.push('Time Spent (hrs)');
+            } else if (type === 'rateCard') {
+                if (!keys.includes('name') && !keys.includes('jiraname') && !keys.includes('jira name')) missing.push('Name or Jira Name');
+                if (!keys.includes('monthlysalary') && !keys.includes('monthly salary')) missing.push('Monthly Salary');
+                if (!keys.includes('function')) missing.push('Function');
+            } else if (type === 'resourceList') {
+                if (!keys.includes('name') && !keys.includes('jiraname') && !keys.includes('jira name')) missing.push('Name or Jira Name');
+                if (!keys.includes('dateofjoining') && !keys.includes('date of joining') && !keys.includes('doj')) missing.push('Date of Joining (DOJ)');
+            } else if (type === 'projectMaster') {
+                if (!keys.includes('project') && !keys.includes('customername') && !keys.includes('customer name')) missing.push('Project or Customer Name');
+                if (!keys.includes('category')) missing.push('Category');
+            }
+
+            if (missing.length > 0) {
+                fs.unlinkSync(filePath);
+                return res.status(400).json({ error: `Validation Failed. The uploaded ${type} sheet is missing required columns: ${missing.join(', ')}` });
+            }
+        }
+
         projectState[type] = data;
+        projectState.lastRefreshed = new Date().toISOString();
         fs.unlinkSync(filePath); // Cleanup
 
         res.json({
@@ -320,7 +351,21 @@ app.get('/api/calculate', (req, res) => {
     try {
         console.log(`[DEBUG] /api/calculate triggered.`);
         console.log(`[DEBUG] Current projectState size: Jira: ${projectState.jiraDump?.length || 0}, Rates: ${projectState.rateCard?.length || 0}, Resources: ${projectState.resourceList?.length || 0}`);
-        const results = financeEngine.process(projectState);
+        const inputData = {
+            jiraDump: projectState.jiraDump,
+            rateCard: projectState.rateCard,
+            resourceList: projectState.resourceList,
+            projectMaster: projectState.projectMaster,
+            overheadPool: projectState.overheadPool,
+            attendanceSummary: attendanceState.summary,
+            filters: {
+                year: req.query.year || 'All',
+                quarter: req.query.quarter || 'All',
+                month: req.query.month || 'All'
+            }
+        };
+        const results = financeEngine.process(inputData);
+        results.lastRefreshed = projectState.lastRefreshed;
         res.json(results);
     } catch (err) {
         console.error(`[DEBUG] /api/calculate Error:`, err);
@@ -337,14 +382,22 @@ app.get('/api/calculate-resource', async (req, res) => {
         const inputData = {
             JiraDump: projectState.jiraDump,
             ResourceMaster: projectState.resourceList, // Linked to existing upload
+            RateCard: projectState.rateCard,
+            ProjectMaster: projectState.projectMaster,
             AttendanceSummary: attendanceState.summary,
             MatchingReport: attendanceState.matchingReport,
-            AttendanceQC: attendanceState.qcFlags
+            AttendanceQC: attendanceState.qcFlags,
+            Filters: {
+                year: req.query.year || 'All',
+                quarter: req.query.quarter || 'All',
+                month: req.query.month || 'All'
+            }
         };
 
         console.log(`[DEBUG] Resource Report Input Data Size: Jira: ${inputData.JiraDump?.length || 0}, ResourceMaster: ${inputData.ResourceMaster?.length || 0}, AttendanceSummary: ${inputData.AttendanceSummary?.length || 0}`);
 
         const results = resourceEngine.process(inputData);
+        results.lastRefreshed = projectState.lastRefreshed;
 
         // Save Excel logic
         const dateStr = new Date().toISOString().replace(/T.*/, '').replace(/-/g, '');

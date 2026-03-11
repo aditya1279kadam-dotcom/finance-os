@@ -3,8 +3,68 @@ const xlsx = require('xlsx');
 class ResourceEngine {
     constructor() { }
 
+    parseDate(input) {
+        if (!input) return null;
+        if (typeof input === 'number') {
+            return new Date(Math.round((input - 25569) * 86400 * 1000));
+        }
+        const d = new Date(input);
+        return isNaN(d.getTime()) ? null : d;
+    }
+
+    getWorkingDays(startDate, endDate) {
+        if (!startDate || isNaN(startDate.getTime())) return 0;
+        if (!endDate || isNaN(endDate.getTime())) return 0;
+        if (startDate > endDate) return 0;
+
+        let days = 0;
+        let current = new Date(startDate);
+        current.setHours(0, 0, 0, 0);
+        let end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+
+        while (current <= end) {
+            let day = current.getDay();
+            if (day !== 0 && day !== 6) {
+                days++;
+            }
+            current.setDate(current.getDate() + 1);
+        }
+        return days;
+    }
+
+    getPeriodBounds(filters) {
+        let start = new Date('2024-04-01');
+        let end = new Date();
+
+        if (filters && filters.year && filters.year !== 'All') {
+            const fyYear = parseInt(filters.year.replace('FY', '')) + 2000;
+            start = new Date(`${fyYear - 1}-04-01`);
+            end = new Date(`${fyYear}-03-31`);
+
+            if (filters.quarter && filters.quarter !== 'All') {
+                const qMap = {
+                    'Q1': { sm: 4, em: 6 },
+                    'Q2': { sm: 7, em: 9 },
+                    'Q3': { sm: 10, em: 12 },
+                    'Q4': { sm: 1, em: 3 }
+                };
+                const q = qMap[filters.quarter];
+                if (q) {
+                    const sYear = q.sm >= 4 ? fyYear - 1 : fyYear;
+                    const eYear = q.em >= 4 ? fyYear - 1 : fyYear;
+                    start = new Date(sYear, q.sm - 1, 1);
+                    end = new Date(eYear, q.em, 0);
+                }
+            }
+        }
+
+        if (end > new Date()) end = new Date();
+        return { periodStart: start, periodEnd: end };
+    }
+
     process(data) {
-        const { JiraDump = [], ResourceMaster = [], AttendanceSummary = [], MatchingReport = [], AttendanceQC = [] } = data;
+        const { JiraDump = [], ResourceMaster = [], RateCard = [], AttendanceSummary = [], Filters = {}, MatchingReport = [], AttendanceQC = [] } = data;
 
         const qcReport = {
             missingSheets: [],
@@ -27,11 +87,102 @@ class ResourceEngine {
             return undefined;
         };
 
-        // 1. Map Jira Project Categories to FinalCategory
+        // 1. Initialize resource map from ResourceMaster & RateCard
+        const resources = {};
+        const { periodStart, periodEnd } = this.getPeriodBounds(Filters);
+
+        // Build RateCard map for faster function lookup
+        const rateMap = {};
+        RateCard.forEach(r => {
+            const n = (getVal(r, 'Name', 'ResourceName') || '').trim();
+            if (n) rateMap[n] = getVal(r, 'Function', 'function') || 'Unknown';
+        });
+
+        const missingJiraIDs = [];
+        const defaulters = [];
+
+        ResourceMaster.forEach(row => {
+            const name = (getVal(row, 'Jira Name', 'Name', 'ResourceName') || '').trim();
+            const formalName = (getVal(row, 'Name') || name).trim();
+            if (!name) return;
+
+            const dojStr = getVal(row, 'Date of Joining', 'DOJ');
+            const dosStr = getVal(row, 'Date of Separation', 'DOS');
+
+            let doj = this.parseDate(dojStr) || periodStart;
+            let dos = this.parseDate(dosStr);
+
+            let effStart = doj > periodStart ? doj : periodStart;
+            let effEnd = dos && dos < periodEnd ? dos : periodEnd;
+
+            const reqH = effStart <= effEnd ? this.getWorkingDays(effStart, effEnd) * 8 : 0;
+            const func = rateMap[formalName] || 'Unknown';
+
+            resources[name] = {
+                ResourceName: name,
+                FormalName: formalName,
+                Function: func,
+                RequiredHours: reqH,
+                TotalUncappedJira: 0,
+                ExternalHours: 0, InternalHours: 0, CAAPL_Hours: 0,
+                LND_Hours: 0, Sales_Hours: 0, Leaves_Hours_Jira: 0, Bench_Hours_Jira: 0,
+                ActualLeaveDays: 0
+            };
+        });
+
+        // 2. Pre-scan Jira for Total Uncapped Hours per Author
+        JiraDump.forEach(row => {
+            const author = (getVal(row, 'Author', 'resourcename') || '').trim();
+            const timeSpent = parseFloat(getVal(row, 'time spent (hrs)', 'Time Spent (Hours)')) || 0;
+            if (author && resources[author]) {
+                resources[author].TotalUncappedJira += timeSpent;
+            } else if (author && timeSpent > 0) {
+                // If the author is NOT in ResourceMaster but logged time, create them gracefully
+                resources[author] = {
+                    ResourceName: author, FormalName: author, Function: 'Unknown',
+                    RequiredHours: 0, TotalUncappedJira: timeSpent,
+                    ExternalHours: 0, InternalHours: 0, CAAPL_Hours: 0, LND_Hours: 0, Sales_Hours: 0, Leaves_Hours_Jira: 0, Bench_Hours_Jira: 0, ActualLeaveDays: 0
+                };
+            }
+        });
+
+        // 3. Identify Missing IDs and Defaulters (Tech/Product only)
+        Object.values(resources).forEach(r => {
+            const isTechProduct = r.Function === 'Technology' || r.Function === 'Product';
+
+            // Check if missing Jira ID (Doesn't exist in JiraDump)
+            let existsInJira = JiraDump.some(row => (getVal(row, 'Author', 'resourcename') || '').trim() === r.ResourceName);
+            if (isTechProduct && !existsInJira) {
+                missingJiraIDs.push(r.ResourceName);
+                r.MissingJiraID = true;
+            }
+
+            // Defaulter: Exists but no hours, or logged < required
+            if (r.RequiredHours > 0 && r.TotalUncappedJira === 0 && existsInJira) {
+                defaulters.push({ name: r.ResourceName, type: 'No Logs', required: r.RequiredHours });
+            } else if (r.RequiredHours > 0 && r.TotalUncappedJira < r.RequiredHours && existsInJira) {
+                defaulters.push({ name: r.ResourceName, type: 'Partial Logs', required: r.RequiredHours, logged: r.TotalUncappedJira, missing: r.RequiredHours - r.TotalUncappedJira });
+            }
+        });
+
+        // 4. Map Jira Project Categories to FinalCategory & Cap Hours
         const processedJira = JiraDump.map(row => {
             const author = (getVal(row, 'Author', 'resourcename') || '').trim();
             const projectCat = (getVal(row, 'ProjectCategory', 'project category') || '').trim();
-            const cappedHours = parseFloat(getVal(row, 'CappedHours', 'capped hours', 'capped_hours', 'time spent (hrs)')) || 0;
+            let timeSpent = parseFloat(getVal(row, 'CappedHours', 'capped hours', 'time spent (hrs)', 'Time Spent (Hours)')) || 0;
+
+            const resObj = resources[author];
+            const reqH = resObj ? resObj.RequiredHours : 0;
+            const totalU = resObj ? resObj.TotalUncappedJira : timeSpent;
+
+            // Apply Row-level Capping
+            let cappedHours = timeSpent;
+            if (totalU > reqH && reqH > 0) {
+                cappedHours = (timeSpent / totalU) * reqH;
+            } else if (reqH === 0 && totalU > 0) {
+                // Not standard according to spec, but if someone logged but has 0 required, 
+                cappedHours = timeSpent;
+            }
 
             let finalCat = 'Unknown';
             const catLower = projectCat.toLowerCase();
@@ -57,40 +208,9 @@ class ResourceEngine {
             return { author, finalCat, cappedHours };
         });
 
-        // 2. Initialize resource map from ResourceMaster
-        const resources = {};
-        ResourceMaster.forEach(row => {
-            const name = (getVal(row, 'Jira Name', 'Name', 'ResourceName') || '').trim();
-            if (!name) return;
-            const reqH = getVal(row, 'RequiredHours', 'Required Hours (Formula)', 'Required Hours');
-
-            resources[name] = {
-                ResourceName: name,
-                RequiredHours: reqH !== undefined && reqH !== null ? parseFloat(reqH) : 176,
-                ExternalHours: 0,
-                InternalHours: 0,
-                CAAPL_Hours: 0,
-                LND_Hours: 0,
-                Sales_Hours: 0,
-                Leaves_Hours_Jira: 0,
-                Bench_Hours_Jira: 0,
-                ActualLeaveDays: 0 // Will be filled from AttendanceSummary
-            };
-        });
-
-        // 3. Aggregate Jira hours per resource
+        // 5. Aggregate Capped Jira hours per resource
         processedJira.forEach(row => {
-            if (!row.author) return;
-            // Note: In some cases row.author might need to be matched to ResourceMaster names
-            // but usually Jira Name in ResourceMaster matches Author in JiraDump.
-            if (!resources[row.author]) {
-                resources[row.author] = {
-                    ResourceName: row.author, RequiredHours: 176,
-                    ExternalHours: 0, InternalHours: 0, CAAPL_Hours: 0,
-                    LND_Hours: 0, Sales_Hours: 0, Leaves_Hours_Jira: 0, Bench_Hours_Jira: 0,
-                    ActualLeaveDays: 0
-                };
-            }
+            if (!row.author || !resources[row.author]) return;
             const r = resources[row.author];
             if (row.finalCat === 'External Billable') r.ExternalHours += row.cappedHours;
             else if (row.finalCat === 'Internal Billable') r.InternalHours += row.cappedHours;
@@ -198,6 +318,8 @@ class ResourceEngine {
         };
 
         qcReport.unknownCategories = Array.from(qcReport.unknownCategories);
+        qcReport.missingJiraIDs = missingJiraIDs;
+        qcReport.defaulters = defaulters;
 
         return {
             reportData,

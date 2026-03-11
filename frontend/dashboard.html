@@ -72,7 +72,13 @@
                     </svg>
                 </button>
                 <div>
-                    <h1>Executive Analytics</h1>
+                    <h1 style="display: flex; align-items: center; gap: 12px;">
+                        Executive Analytics
+                        <span id="lastRefreshedBadge"
+                            style="font-size: 0.75rem; padding: 4px 10px; background: rgba(16, 185, 129, 0.1); color: #10b981; border-radius: 12px; font-weight: 600; border: 1px solid rgba(16, 185, 129, 0.2); display: none;">
+                            Refreshed: Just now
+                        </span>
+                    </h1>
                     <p>Enterprise Profitability & Margin Performance Ledger</p>
                 </div>
             </div>
@@ -106,6 +112,12 @@
                     <option value="Q2">Q2 (Jul-Sep)</option>
                     <option value="Q3">Q3 (Oct-Dec)</option>
                     <option value="Q4">Q4 (Jan-Mar)</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Month</label>
+                <select id="filterMonth">
+                    <option value="All">All Months</option>
                 </select>
             </div>
             <div class="filter-group">

@@ -6,7 +6,7 @@ class Dashboard {
     constructor() {
         console.log('FinanceOS: Initializing Dashboard...');
         const storedData = localStorage.getItem('pl_dashboard_results');
-        
+
         if (!storedData) {
             console.warn('FinanceOS: No calculation data found in localStorage. Prompting for sync.');
             this.showEmptyState();
@@ -44,7 +44,17 @@ class Dashboard {
         this.renderKPIs(this.data.summary);
         this.renderCharts(this.data.report);
         UI.renderPaginatedTable('tableContainer', this.data.report, 8);
+        this.updateLastRefreshed(this.data.lastRefreshed);
         this.setupFilters();
+    }
+
+    updateLastRefreshed(timestamp) {
+        const badge = document.getElementById('lastRefreshedBadge');
+        if (badge && timestamp) {
+            const date = new Date(timestamp);
+            badge.textContent = `Refreshed: ${date.toLocaleString()}`;
+            badge.style.display = 'inline-block';
+        }
     }
 
     async loadCategoryFilter() {
@@ -53,7 +63,7 @@ class Dashboard {
             const filterEl = document.getElementById('filterCategory');
             if (filterEl) {
                 // Keep "All Categories" and add dynamic ones
-                filterEl.innerHTML = '<option value="All">All Categories</option>' + 
+                filterEl.innerHTML = '<option value="All">All Categories</option>' +
                     metadata.categories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
             }
         } catch (err) {
@@ -62,11 +72,29 @@ class Dashboard {
     }
 
     setupFilters() {
-        const filters = ['filterFY', 'filterQuarter', 'filterCategory'];
+        const filters = ['filterFY', 'filterQuarter', 'filterMonth', 'filterCategory'];
         filters.forEach(id => {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', () => this.applyFilters());
         });
+
+        // Cascading Month
+        const qEl = document.getElementById('filterQuarter');
+        const mEl = document.getElementById('filterMonth');
+        if (qEl && mEl) {
+            qEl.addEventListener('change', () => {
+                const qMap = {
+                    'Q1': ['Apr', 'May', 'Jun'],
+                    'Q2': ['Jul', 'Aug', 'Sep'],
+                    'Q3': ['Oct', 'Nov', 'Dec'],
+                    'Q4': ['Jan', 'Feb', 'Mar']
+                };
+                mEl.innerHTML = '<option value="All">All Months</option>';
+                if (qMap[qEl.value]) {
+                    qMap[qEl.value].forEach(m => mEl.innerHTML += `<option value="${m}">${m}</option>`);
+                }
+            });
+        }
 
         const clearBtn = document.getElementById('clearFilters');
         if (clearBtn) {
@@ -100,23 +128,65 @@ class Dashboard {
         });
     }
 
-    applyFilters() {
+    async applyFilters() {
         const fy = document.getElementById('filterFY').value;
         const q = document.getElementById('filterQuarter').value;
+        const m = document.getElementById('filterMonth') ? document.getElementById('filterMonth').value : 'All';
         const cat = document.getElementById('filterCategory').value;
 
-        const filteredReport = this.originalReport.filter(row => {
-            // For POC, FY and Quarter filtering is simulated or based on partial matches if available
-            // Since we don't have explicit FY/Quarter columns in all dummy sets yet, we allow 'All'
-            const matchCat = cat === 'All' || row.category === cat;
-            return matchCat;
-        });
+        // Visual loading state
+        document.querySelector('.main-content').style.opacity = '0.5';
+        document.querySelector('.main-content').style.pointerEvents = 'none';
 
-        const filteredSummary = this.calculateFilteredSummary(filteredReport);
-        
-        this.renderKPIs(filteredSummary);
-        this.renderCharts(filteredReport);
-        UI.renderPaginatedTable('tableContainer', filteredReport, 8);
+        try {
+            // Fetch dynamically from backend
+            const newData = await API.calculateReport({ year: fy, quarter: q, month: m });
+            this.data = newData;
+            localStorage.setItem('pl_dashboard_results', JSON.stringify(newData));
+            this.updateLastRefreshed(newData.lastRefreshed);
+
+            // Client-side category filtering (since backend might not filter it if not asked, or we do it here)
+            const filteredReport = this.data.report.filter(row => {
+                const matchCat = cat === 'All' || row.category === cat;
+                return matchCat;
+            });
+
+            const filteredSummary = this.calculateFilteredSummary(filteredReport);
+
+            this.renderKPIs(filteredSummary);
+            this.renderCharts(filteredReport);
+            UI.renderPaginatedTable('tableContainer', filteredReport, 8);
+
+            // Highlight missing projects
+            this.highlightMissingProjects(filteredReport);
+
+        } catch (e) {
+            console.error('Filter apply failed', e);
+            alert('Failed to calculate report with these filters');
+        } finally {
+            document.querySelector('.main-content').style.opacity = '1';
+            document.querySelector('.main-content').style.pointerEvents = 'auto';
+        }
+    }
+
+    highlightMissingProjects(report) {
+        setTimeout(() => {
+            const rows = document.querySelectorAll('#tableContainer tbody tr');
+            rows.forEach(tr => {
+                const projectName = tr.querySelector('td:nth-child(1) div').textContent.trim();
+                const projectData = report.find(r => r.project === projectName);
+                if (projectData && projectData.projectMissingInJira) {
+                    const badge = document.createElement('span');
+                    badge.className = 'badge-pill';
+                    badge.style.backgroundColor = '#fef2f2';
+                    badge.style.color = '#ef4444';
+                    badge.style.border = '1px solid #fecaca';
+                    badge.style.marginLeft = '8px';
+                    badge.textContent = 'Missing Logs';
+                    tr.querySelector('td:nth-child(1)').appendChild(badge);
+                }
+            });
+        }, 100);
     }
 
     calculateFilteredSummary(report) {
@@ -136,7 +206,7 @@ class Dashboard {
         document.getElementById('kpiFullyLoaded').textContent = UI.formatCurrency(summary.totalFullyLoaded);
         document.getElementById('kpiProfit').textContent = UI.formatCurrency(summary.totalProfit);
         document.getElementById('kpiMargin').textContent = (summary.avgMargin * 100).toFixed(1) + '%';
-        
+
         // Status indicator in KPI panel
         const marginEl = document.getElementById('marginIndicator');
         const marginClass = UI.getMarginClass(summary.avgMargin);
@@ -163,10 +233,10 @@ class Dashboard {
                     { label: 'Loaded Cost', data: report.map(r => r.fullyLoadedCost), backgroundColor: '#e2e8f0', borderRadius: 6, barThickness: 24 }
                 ]
             },
-            options: { 
+            options: {
                 maintainAspectRatio: false,
                 plugins: { legend: { position: 'top', align: 'end', labels: { boxWidth: 8, usePointStyle: true, pointStyle: 'circle' } } },
-                scales: { 
+                scales: {
                     y: { grid: { borderDash: [4, 4], color: '#f1f5f9' }, border: { display: false } },
                     x: { grid: { display: false } }
                 }
@@ -204,17 +274,17 @@ class Dashboard {
                     barThickness: 32
                 }]
             },
-            options: { 
+            options: {
                 indexAxis: 'y',
                 maintainAspectRatio: false,
-                plugins: { 
+                plugins: {
                     legend: { display: false },
                     tooltip: { callbacks: { label: (ctx) => ` Margin: ${ctx.parsed.x.toFixed(1)}%` } }
                 },
-                scales: { 
-                    x: { 
-                        max: 100, 
-                        beginAtZero: true, 
+                scales: {
+                    x: {
+                        max: 100,
+                        beginAtZero: true,
                         grid: { color: '#f1f5f9' },
                         title: { display: true, text: 'Percentage (%)', font: { weight: '700' } }
                     },
@@ -226,10 +296,10 @@ class Dashboard {
 }
 
 // Global Export CSV
-window.exportCSV = function() {
+window.exportCSV = function () {
     const res = JSON.parse(localStorage.getItem('pl_dashboard_results'));
     if (!res) return;
-    
+
     const headers = [
         "Project", "Product", "Category", "Project Key", "Status",
         "PO Amount", "Revenue FY25", "Revenue FY26", "Cumulative Revenue", "Budget To Go",
@@ -240,7 +310,7 @@ window.exportCSV = function() {
     ];
 
     let csv = headers.join(',') + '\n';
-    
+
     res.report.forEach(row => {
         const values = [
             row.project, row.product, row.category, row.projectKey, row.projectStatus,

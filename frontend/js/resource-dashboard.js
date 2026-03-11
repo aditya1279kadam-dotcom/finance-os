@@ -6,29 +6,84 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnDownloadExcel = document.getElementById('btnDownloadExcel');
     const btnDownloadPPTX = document.getElementById('btnDownloadPPTX');
 
+
+    setupFilters();
+
     btnCalculate.addEventListener('click', async () => {
-        try {
-            btnCalculate.innerHTML = 'Calculating...';
-            const data = await API.calculateResourceReport();
-            currentReport = data;
-            renderDashboard(data);
-
-            if (data.exportFiles) {
-                btnDownloadExcel.style.display = 'inline-block';
-                btnDownloadPPTX.style.display = 'inline-block';
-
-                btnDownloadExcel.onclick = () => window.location.href = data.exportFiles.excel;
-                btnDownloadPPTX.onclick = () => window.location.href = data.exportFiles.pptx;
-            }
-        } catch (err) {
-            alert('Error generating report: ' + err.message);
-        } finally {
-            btnCalculate.innerHTML = 'Run Calculation';
-        }
+        await applyFilters();
     });
 });
 
 let resourceChartInst = null;
+
+function setupFilters() {
+    const filters = ['filterFY', 'filterQuarter', 'filterMonth'];
+    filters.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', () => applyFilters());
+    });
+
+    const qEl = document.getElementById('filterQuarter');
+    const mEl = document.getElementById('filterMonth');
+    if (qEl && mEl) {
+        qEl.addEventListener('change', () => {
+            const qMap = {
+                'Q1': ['Apr', 'May', 'Jun'],
+                'Q2': ['Jul', 'Aug', 'Sep'],
+                'Q3': ['Oct', 'Nov', 'Dec'],
+                'Q4': ['Jan', 'Feb', 'Mar']
+            };
+            mEl.innerHTML = '<option value="All">All Months</option>';
+            if (qMap[qEl.value]) {
+                qMap[qEl.value].forEach(m => mEl.innerHTML += `<option value="${m}">${m}</option>`);
+            }
+        });
+    }
+
+    const clearBtn = document.getElementById('clearFilters');
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            filters.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.value = 'All';
+            });
+            applyFilters();
+        });
+    }
+}
+
+async function applyFilters() {
+    const fy = document.getElementById('filterFY') ? document.getElementById('filterFY').value : 'All';
+    const q = document.getElementById('filterQuarter') ? document.getElementById('filterQuarter').value : 'All';
+    const m = document.getElementById('filterMonth') ? document.getElementById('filterMonth').value : 'All';
+
+    const btnCalculate = document.getElementById('btnCalculate');
+    const btnDownloadExcel = document.getElementById('btnDownloadExcel');
+    const btnDownloadPPTX = document.getElementById('btnDownloadPPTX');
+
+    try {
+        btnCalculate.innerHTML = 'Calculating...';
+        document.querySelector('.main-content').style.opacity = '0.5';
+
+        const data = await API.calculateResourceReport({ year: fy, quarter: q, month: m });
+        currentReport = data;
+        renderDashboard(data);
+
+        if (data.exportFiles) {
+            btnDownloadExcel.style.display = 'inline-block';
+            btnDownloadPPTX.style.display = 'inline-block';
+
+            btnDownloadExcel.onclick = () => window.location.href = data.exportFiles.excel;
+            btnDownloadPPTX.onclick = () => window.location.href = data.exportFiles.pptx;
+        }
+    } catch (err) {
+        console.error(err);
+        alert('Error generating report: ' + err.message);
+    } finally {
+        btnCalculate.innerHTML = 'Run Calculation';
+        document.querySelector('.main-content').style.opacity = '1';
+    }
+}
 
 function renderDashboard(data) {
     const { summary, qcReport } = data;
@@ -56,7 +111,68 @@ function renderDashboard(data) {
     document.getElementById('summaryText').innerText = summaryText;
     document.getElementById('executiveSummary').style.display = 'block';
 
+    if (data.lastRefreshed) {
+        const badge = document.getElementById('lastRefreshedBadge');
+        if (badge) {
+            badge.textContent = `Refreshed: ${new Date(data.lastRefreshed).toLocaleString()}`;
+            badge.style.display = 'inline-block';
+        }
+    }
+
+    renderDefaulters(qcReport);
+
     document.getElementById('footerTimestamp').innerText = `Generated: ${new Date().toLocaleString()}`;
+}
+
+function renderDefaulters(qc) {
+    const container = document.getElementById('defaultersContainer');
+    const tableContainer = document.getElementById('defaultersTableContainer');
+    if (!container || !tableContainer) return;
+
+    const { defaulters = [], missingJiraIDs = [] } = qc;
+
+    if (defaulters.length === 0 && missingJiraIDs.length === 0) {
+        container.style.display = 'none';
+        return;
+    }
+
+    container.style.display = 'block';
+
+    let html = `
+        <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem; text-align: left; margin-top: 12px;">
+            <thead>
+                <tr style="border-bottom: 2px solid #fecaca; color: #b91c1c;">
+                    <th style="padding: 12px;">Resource Name</th>
+                    <th style="padding: 12px;">Issue Type</th>
+                    <th style="padding: 12px;">Details</th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
+
+    missingJiraIDs.forEach(name => {
+        html += `
+            <tr style="border-bottom: 1px solid #fee2e2;">
+                <td style="padding: 12px; font-weight: 600;">${name}</td>
+                <td style="padding: 12px;"><span class="badge-pill" style="background:#fef2f2; border:1px solid #fecaca; color:#ef4444;">Missing Jira ID</span></td>
+                <td style="padding: 12px; color: #7f1d1d;">Resource is mapped as Tech/Product but not found in Jira Dump.</td>
+            </tr>
+        `;
+    });
+
+    defaulters.forEach(d => {
+        let msg = d.LoggedHours === 0 ? 'Zero hours logged in Jira.' : `Logged ${d.LoggedHours} hrs, expected ${d.RequiredHours} hrs.`;
+        html += `
+            <tr style="border-bottom: 1px solid #fee2e2;">
+                <td style="padding: 12px; font-weight: 600;">${d.ResourceName}</td>
+                <td style="padding: 12px;"><span class="badge-pill" style="background:#fef2f2; border:1px solid #fecaca; color:#ef4444;">Defaulter</span></td>
+                <td style="padding: 12px; color: #7f1d1d;">${msg}</td>
+            </tr>
+        `;
+    });
+
+    html += `</tbody></table>`;
+    tableContainer.innerHTML = html;
 }
 
 function renderChart(top10) {

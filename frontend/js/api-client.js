@@ -18,8 +18,9 @@ const API = {
         return response.json();
     },
 
-    async calculateReport() {
-        const response = await fetch(`${BASE_URL}/api/calculate`);
+    async calculateReport(filters = {}) {
+        const query = new URLSearchParams(filters).toString();
+        const response = await fetch(`${BASE_URL}/api/calculate${query ? '?' + query : ''}`);
         if (!response.ok) throw new Error('Calculation failed');
         return response.json();
     },
@@ -38,10 +39,10 @@ const API = {
         return response.json();
     },
 
-    async calculateResourceReport() {
-        const response = await fetch(`${BASE_URL}/api/calculate-resource`);
+    async calculateResourceReport(filters = {}) {
+        const query = new URLSearchParams(filters).toString();
+        const response = await fetch(`${BASE_URL}/api/calculate-resource${query ? '?' + query : ''}`);
         if (!response.ok) throw new Error('Resource calculation failed');
-        console.log(response);
         return response.json();
     },
 
