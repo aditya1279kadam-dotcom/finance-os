@@ -6,6 +6,7 @@ import { FinanceApiService } from '../../services/finance-api.service';
 import { DataProcessingService } from '../../services/data-processing.service';
 import { CategoryCardComponent } from '../../components/category-card/category-card.component';
 import { PerformanceLedgerComponent } from '../../components/performance-ledger/performance-ledger.component';
+import { environment } from '../../../environments/environment';
 
 @Component({
   selector: 'app-project-dashboard',
@@ -272,7 +273,7 @@ export class ProjectDashboardComponent implements OnInit {
   async resetEnvironment() {
     if (confirm('Are you sure you want to clear all data? This will reset the state on the server.')) {
       try {
-        await fetch('http://localhost:3000/api/clear-data', { method: 'POST' }); // Using plain fetch for quick clear
+        await fetch(`${environment.apiUrl}/api/clear-data`, { method: 'POST' }); // Using plain fetch for quick clear
         localStorage.removeItem('pl_dashboard_results');
         localStorage.removeItem('res_dashboard_results');
         alert('Data cleared successfully.');

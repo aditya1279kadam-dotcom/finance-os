@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { HeaderComponent } from '../../components/header/header.component';
 import { HttpClient } from '@angular/common/http';
 import { firstValueFrom } from 'rxjs';
+import { environment } from '../../../environments/environment';
 
 @Component({
     selector: 'app-sync-center',
@@ -80,7 +81,7 @@ export class SyncCenterComponent {
     plUploading = false;
     resUploading = false;
 
-    private baseUrl = 'http://localhost:3000';
+    private baseUrl = environment.apiUrl;
 
     constructor(private http: HttpClient) {
         this.checkHealth();
