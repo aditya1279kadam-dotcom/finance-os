@@ -28,10 +28,25 @@ import { FinanceApiService } from '../../services/finance-api.service';
         <div class="amount">{{ stats.resources }}</div>
         <div class="growth">In current dataset</div>
       </div>
+      <div class="kpi-panel" [ngStyle]="{'background': stats.defaulters > 0 ? 'rgba(239, 68, 68, 0.05)' : 'rgba(16, 185, 129, 0.05)', 'border-color': stats.defaulters > 0 ? '#ef4444' : '#10b981' }">
+        <div class="tag">Action Required</div>
+        <div class="amount" [ngStyle]="{'color': stats.defaulters > 0 ? '#ef4444' : '#10b981' }">
+            {{ stats.defaulters }}
+            <svg *ngIf="stats.defaulters > 0" width="20" height="20" viewBox="0 0 24 24" fill="#ef4444" style="margin-left: 8px; vertical-align: middle;"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+            <svg *ngIf="stats.defaulters === 0" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="3" style="margin-left: 8px; vertical-align: middle;"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="growth" style="display: flex; justify-content: space-between; align-items: center;">
+            Mapping Issues 
+            <button *ngIf="stats.defaulters > 0" (click)="downloadActionRequired()" class="mini-btn">Excel</button>
+        </div>
+      </div>
       <div class="kpi-panel">
-        <div class="tag">Jira Defaulters</div>
-        <div class="amount" [ngStyle]="{'color': stats.defaulters > 0 ? '#ef4444' : 'inherit' }">{{ stats.defaulters }}</div>
-        <div class="growth">Missing mappings</div>
+        <div class="tag">Jira Defaulter's</div>
+        <div class="amount" style="color: #f59e0b;">{{ stats.jiraDefaultersCount || 0 }}</div>
+        <div class="growth" style="display: flex; justify-content: space-between; align-items: center;">
+            Missing Hours
+            <button (click)="downloadJiraDefaulters()" class="mini-btn" style="border-color: #f59e0b; color: #f59e0b;">Excel</button>
+        </div>
       </div>
     </div>
 
@@ -40,7 +55,7 @@ import { FinanceApiService } from '../../services/finance-api.service';
         <div class="card" style="grid-column: span 2;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
                 <h3><svg width="18" height="18" stroke="currentColor" fill="none" stroke-width="2.5" viewBox="0 0 24 24" style="margin-right: 8px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg> Ingestion Workflows</h3>
-                <button (click)="generateReports()" class="btn-gold" [disabled]="processing" style="padding: 12px 24px;">
+                <button (click)="triggerGenerateGate()" class="btn-gold" [disabled]="processing" style="padding: 12px 24px;">
                      {{ processing ? 'Processing Data...' : 'Generate Dashboard Reports & Validate Data' }}
                 </button>
             </div>
@@ -198,6 +213,36 @@ import { FinanceApiService } from '../../services/finance-api.service';
             </div>
         </div>
     </div>
+
+    <!-- VERIFICATION MODAL -->
+    <div *ngIf="showVerificationModal" class="modal-overlay">
+        <div class="modal-card">
+            <h3 style="margin-top: 0; color: #4f46e5; border-bottom: 2px solid #f3f4f6; padding-bottom: 16px;">Pre-Report Verification</h3>
+            <p style="margin: 20px 0; color: var(--text-primary); font-weight: 500;">
+                Please confirm the following updates have been completed before generating the report:
+            </p>
+            
+            <div class="checklist">
+                <div class="check-item" style="margin-bottom: 12px; display: flex; align-items: center; gap: 10px;">
+                    <input type="checkbox" id="check1" [(ngModel)]="verificationState.projectsUpdated" style="width: 18px; height: 18px; cursor: pointer;">
+                    <label for="check1" style="cursor: pointer; font-size: 0.95rem;">Closed projects status updated?</label>
+                </div>
+                <div class="check-item" style="margin-bottom: 12px; display: flex; align-items: center; gap: 10px;">
+                    <input type="checkbox" id="check2" [(ngModel)]="verificationState.employeesUpdated" style="width: 18px; height: 18px; cursor: pointer;">
+                    <label for="check2" style="cursor: pointer; font-size: 0.95rem;">Recent Employee Joinings/Exits accounted for?</label>
+                </div>
+                <div class="check-item" style="margin-bottom: 12px; display: flex; align-items: center; gap: 10px;">
+                    <input type="checkbox" id="check3" [(ngModel)]="verificationState.revenueUpdated" style="width: 18px; height: 18px; cursor: pointer;">
+                    <label for="check3" style="cursor: pointer; font-size: 0.95rem;">MoM Revenue data updated?</label>
+                </div>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 32px;">
+                <button (click)="showVerificationModal = false" class="btn-outline">Cancel</button>
+                <button (click)="confirmAndGenerate()" [disabled]="!isVerified" class="btn-primary-jira">Acknowledge & Generate</button>
+            </div>
+        </div>
+    </div>
   `,
     styles: [`
     .file-input {
@@ -210,6 +255,61 @@ import { FinanceApiService } from '../../services/finance-api.service';
         font-family: 'Inter', sans-serif;
         font-size: 0.85rem;
         box-sizing: border-box;
+    }
+
+    /* Modal Styles */
+    .modal-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: rgba(0, 0, 0, 0.4);
+        backdrop-filter: blur(4px);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 9999;
+        animation: fadeIn 0.2s ease-out;
+    }
+
+    .modal-card {
+        background: white;
+        padding: 32px;
+        border-radius: 16px;
+        width: 100%;
+        max-width: 500px;
+        box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+        border: 1px solid var(--border);
+    }
+
+    .checklist {
+        background: #f8fafc;
+        padding: 16px;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+    }
+
+    @keyframes fadeIn {
+        from { opacity: 0; transform: scale(0.95); }
+        to { opacity: 1; transform: scale(1); }
+    }
+
+    /* Mini Button for KPI exports */
+    .mini-btn {
+        padding: 2px 8px;
+        font-size: 0.7rem;
+        border-radius: 4px;
+        border: 1px solid #ef4444;
+        background: transparent;
+        color: #ef4444;
+        cursor: pointer;
+        font-weight: 600;
+        transition: all 0.2s;
+        text-transform: uppercase;
+    }
+    .mini-btn:hover {
+        background: rgba(239, 68, 68, 0.1);
     }
 
     /* Jira Panel - Wider */
@@ -435,8 +535,23 @@ export class SyncCenterComponent implements OnDestroy {
     stats = {
         projects: 0,
         resources: 0,
-        defaulters: 0
+        defaulters: 0,
+        jiraDefaultersCount: 0
     };
+
+    // Pre-Report Gate Modal
+    showVerificationModal = false;
+    verificationState = {
+        projectsUpdated: false,
+        employeesUpdated: false,
+        revenueUpdated: false
+    };
+
+    get isVerified(): boolean {
+        return this.verificationState.projectsUpdated && 
+               this.verificationState.employeesUpdated && 
+               this.verificationState.revenueUpdated;
+    }
 
     // Staging area for selected files before generation
     files: { [key: string]: File | null } = {
@@ -656,6 +771,16 @@ export class SyncCenterComponent implements OnDestroy {
         window.open(url, '_blank');
     }
 
+    downloadActionRequired() {
+        const url = this.financeApi.getActionRequiredExportUrl();
+        window.open(url, '_blank');
+    }
+
+    downloadJiraDefaulters() {
+        const url = this.financeApi.getJiraDefaultersExportUrl();
+        window.open(url, '_blank');
+    }
+
     private handleSSEData(data: any) {
         if (data.percent !== undefined) {
             // Progress event
@@ -689,6 +814,22 @@ export class SyncCenterComponent implements OnDestroy {
         }
     }
 
+    triggerGenerateGate() {
+        // Basic check before showing modal
+        const dumpRequired = this.jiraDumpMode === 'csv' ? !!this.files['dump'] : this.jiraExtractComplete;
+        if (!dumpRequired || !this.files['resourceList'] || !this.files['projectMaster'] || !this.files['attendance']) {
+            this.generateReports(); // Let it trigger the alert
+            return;
+        }
+        this.showVerificationModal = true;
+    }
+
+    async confirmAndGenerate() {
+        if (!this.isVerified) return;
+        this.showVerificationModal = false;
+        await this.generateReports();
+    }
+
     async generateReports() {
         // In API mode, we don't require the dump file (it was already sent to backend)
         const dumpRequired = this.jiraDumpMode === 'csv' ? !!this.files['dump'] : this.jiraExtractComplete;
@@ -710,7 +851,7 @@ export class SyncCenterComponent implements OnDestroy {
             this.checkCacheStatus();
 
             if (this.stats.defaulters > 0) {
-                alert(`Processing Complete! \nWarning: ${this.stats.defaulters} Jira Defaulter Map issues found! Missing resources or projects have been flagged.`);
+                alert(`Processing Complete! \nWarning: ${this.stats.defaulters} Action Required issues found! Check the flags above.`);
             } else {
                 alert("Data successfully synchronized and validated. Perfect mappings!");
             }

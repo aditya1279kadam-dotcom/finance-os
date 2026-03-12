@@ -265,7 +265,8 @@ app.post('/api/upload/attendance', upload.single('file'), (req, res) => {
             unmatchedCount: unmatchedNames.length,
             unmatchedNames: unmatchedNames,
             qcCount: qcFlags.length,
-            qcExamples: qcFlags.slice(0, 5) // Send top 5 QC issues to the frontend
+            qcExamples: qcFlags.slice(0, 5), // Send top 5 QC issues to the frontend
+            actionRequiredCount: unmatchedNames.length + qcFlags.length // Combine for stats
         });
 
     } catch (err) {
@@ -720,6 +721,128 @@ app.get('/api/jira/export', (req, res) => {
     } catch (err) {
         console.error('Jira Export Error:', err);
         res.status(500).json({ error: 'Failed to export JIRA data', details: err.message });
+    }
+});
+
+// Calculate and Export Action Required Flags
+app.get('/api/export-action-required', (req, res) => {
+    try {
+        const wb = xlsx.utils.book_new();
+
+        // 1. HR vs Jira Alignment (HR missing in Jira, Jira missing in HR)
+        const hrNames = attendanceState.summary.map(s => s.ResourceName?.toLowerCase().trim() || '');
+        const jiraNames = projectState.resourceList.map(r => (r['Jira Name'] || r['Name'] || '').toLowerCase().trim());
+        
+        const hrMissingInJira = attendanceState.summary.filter(s => {
+            const name = s.ResourceName?.toLowerCase().trim();
+            return name && !jiraNames.includes(name);
+        }).map(s => ({ Issue: 'HR Resource missing in Jira Mapping', Name: s.ResourceName }));
+
+        const jiraMissingInHr = projectState.resourceList.filter(r => {
+            const name = (r['Jira Name'] || r['Name'] || '').toLowerCase().trim();
+            return name && !hrNames.includes(name);
+        }).map(r => ({ Issue: 'Jira Resource missing in HR Data', Name: r['Jira Name'] || r['Name'] }));
+
+        const alignmentData = [...hrMissingInJira, ...jiraMissingInHr];
+        if (alignmentData.length > 0) {
+            xlsx.utils.book_append_sheet(wb, xlsx.utils.json_to_sheet(alignmentData), "Resource_Alignment");
+        }
+
+        // 2. Project List Alignment
+        const masterProjects = projectState.projectMaster.map(p => (p['Project'] || p['Customer Name'] || '').toLowerCase().trim());
+        const jiraDumpProjects = [...new Set(projectState.jiraDump.map(j => (j['Project'] || '').toLowerCase().trim()))].filter(p => p);
+
+        const orphanedProjects = jiraDumpProjects.filter(p => !masterProjects.includes(p))
+            .map(p => ({ Issue: 'Orphaned Jira Project (Not in Master)', Project: projectState.jiraDump.find(j => (j['Project'] || '').toLowerCase().trim() === p)?.['Project'] }));
+
+        const missingProjects = masterProjects.filter(p => !jiraDumpProjects.includes(p))
+            .map(p => ({ Issue: 'Master Project has no Jira Logged Hours', Project: projectState.projectMaster.find(m => (m['Project'] || m['Customer Name'] || '').toLowerCase().trim() === p)?.['Project'] }));
+
+        const projectAlignmentData = [...orphanedProjects, ...missingProjects];
+        if (projectAlignmentData.length > 0) {
+            xlsx.utils.book_append_sheet(wb, xlsx.utils.json_to_sheet(projectAlignmentData), "Project_Alignment");
+        }
+
+        // 3. Variance Anomaly Detection
+        const totalHrHours = attendanceState.summary.reduce((sum, r) => sum + (r.ActualLeaveHours || 0) + (r.RawRowsCount ? r.RawRowsCount*8 : 0), 0) || 1; // Approx total logged HR hours
+        const totalJiraHours = projectState.jiraDump.reduce((sum, j) => sum + (j['Time Spent (hrs)'] || 0), 0);
+        
+        const variance = Math.abs(totalHrHours - totalJiraHours) / totalHrHours;
+        const varianceData = [{
+            'Metric': 'Hours Comparison',
+            'HR Total Hours (Est)': totalHrHours,
+            'Jira Total Tracked Hours': totalJiraHours,
+            'Variance %': (variance * 100).toFixed(2) + '%',
+            'Status': variance > 0.15 ? 'FLAGGED (>15% Variance)' : 'OK'
+        }];
+        xlsx.utils.book_append_sheet(wb, xlsx.utils.json_to_sheet(varianceData), "Variance_Anomaly");
+
+        // Send Excel file
+        const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        res.setHeader('Content-Disposition', 'attachment; filename="Action_Required_Report.xlsx"');
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.send(buffer);
+
+    } catch (err) {
+        console.error('Export Action Required Error:', err);
+        res.status(500).json({ error: 'Failed to generate export', details: err.message });
+    }
+});
+
+// Calculate and Export Jira Defaulters
+app.get('/api/jira-defaulters', (req, res) => {
+    try {
+        if (!projectState.jiraDump?.length || !projectState.resourceList?.length) {
+             return res.status(400).json({ error: 'Missing Jira Dump or Resource List data. Please run extracting/uploading first.' });
+        }
+
+        // Aggregate Jira Hours by Author
+        const authorHours = {};
+        projectState.jiraDump.forEach(row => {
+            const author = (row['Author'] || 'Unknown').trim();
+            authorHours[author] = (authorHours[author] || 0) + (row['Time Spent (hrs)'] || 0);
+        });
+
+        // Compare against expected hours (160h standard if not in ResourceList, but let's map actuals if possible)
+        const defaulters = [];
+        
+        Object.keys(authorHours).forEach(author => {
+            // Find in resource list by name
+            const normalizedAuthor = author.toLowerCase().trim();
+            const resource = projectState.resourceList.find(r => (r['Jira Name'] || r['Name'] || '').toLowerCase().trim() === normalizedAuthor);
+            
+            // Standard expected: 160 hrs/month (could be dynamic based on attendance, using 160 as baseline placeholder)
+            let requiredHours = 160; 
+            if (resource && resource['Required Hours']) {
+                requiredHours = parseFloat(resource['Required Hours']) || 160;
+            }
+
+            const timeSpent = authorHours[author];
+            if (timeSpent < requiredHours) {
+                defaulters.push({
+                    'Name': author,
+                    'Time Spent (hrs)': parseFloat(timeSpent.toFixed(2)),
+                    'Required Hours': requiredHours,
+                    'Deficit (hrs)': parseFloat((requiredHours - timeSpent).toFixed(2))
+                });
+            }
+        });
+
+        if (defaulters.length === 0) {
+             defaulters.push({ 'Message': 'No Defaulters Found' });
+        }
+
+        const wb = xlsx.utils.book_new();
+        xlsx.utils.book_append_sheet(wb, xlsx.utils.json_to_sheet(defaulters), "Jira_Defaulters");
+
+        const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        res.setHeader('Content-Disposition', 'attachment; filename="Jira_Defaulters.xlsx"');
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.send(buffer);
+
+    } catch (err) {
+        console.error('Jira Defaulters Export Error:', err);
+        res.status(500).json({ error: 'Failed to export defaulters', details: err.message });
     }
 });
 
