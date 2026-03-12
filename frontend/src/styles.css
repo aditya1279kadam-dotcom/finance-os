@@ -44,15 +44,13 @@ h4,
 }
 
 .kpi-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 20px;
-  flex-wrap: wrap;
   margin-top: 24px;
 }
 
 .kpi-panel {
-  flex: 1;
-  min-width: 250px;
   background-color: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -247,9 +245,8 @@ h4,
 .main-content {
   flex-grow: 1;
   padding: 32px 48px;
-  max-width: 1600px;
-  /* Optional max-width for very wide screens */
-  margin: 0 auto;
+  min-width: 0; /* prevents flex child overflow */
+  overflow-x: hidden;
 }
 
 /* Filters */
