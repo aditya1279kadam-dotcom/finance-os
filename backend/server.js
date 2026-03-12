@@ -500,7 +500,208 @@ app.post('/api/clear', (req, res) => {
     res.json({ success: true, message: 'All data cleared' });
 });
 
-// Jira Proxy Endpoint
+// ==============================
+// JIRA API INTEGRATION ENDPOINTS
+// ==============================
+
+// Test JIRA Connection
+app.post('/api/jira/test-connection', async (req, res) => {
+    const { jiraUrl, email, apiToken } = req.body;
+    if (!jiraUrl || !email || !apiToken) {
+        return res.status(400).json({ error: 'Missing required fields: jiraUrl, email, apiToken' });
+    }
+    try {
+        const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
+        const response = await axios.get(`${jiraUrl.replace(/\/$/, '')}/rest/api/2/myself`, {
+            headers: { 'Authorization': `Basic ${auth}`, 'Accept': 'application/json' },
+            timeout: 15000
+        });
+        // Also fetch project count
+        const projectsRes = await axios.get(`${jiraUrl.replace(/\/$/, '')}/rest/api/2/project`, {
+            headers: { 'Authorization': `Basic ${auth}`, 'Accept': 'application/json' },
+            timeout: 15000
+        });
+        res.json({
+            success: true,
+            user: response.data.displayName,
+            email: response.data.emailAddress,
+            projectCount: projectsRes.data.length
+        });
+    } catch (error) {
+        const msg = error.response?.data?.message || error.response?.data?.errorMessages?.join(', ') || error.message;
+        res.status(error.response?.status || 500).json({ error: `JIRA Connection Failed: ${msg}` });
+    }
+});
+
+// Extract JIRA Worklogs with SSE Progress
+app.post('/api/jira/extract', async (req, res) => {
+    const { jiraUrl, email, apiToken, jql, epicField } = req.body;
+    const effectiveEpicField = epicField || 'customfield_10014';
+
+    if (!jiraUrl || !email || !apiToken) {
+        return res.status(400).json({ error: 'Missing required JIRA credentials' });
+    }
+
+    // Setup SSE
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*'
+    });
+
+    const sendEvent = (type, data) => {
+        res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+        const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
+        const headers = { 'Authorization': `Basic ${auth}`, 'Accept': 'application/json' };
+        const baseUrl = jiraUrl.replace(/\/$/, '');
+
+        sendEvent('progress', { percent: 0, status: 'Fetching project categories...', issue: '' });
+
+        // 1. Cache project categories
+        const projectCategoryMap = {};
+        try {
+            const projRes = await axios.get(`${baseUrl}/rest/api/2/project`, { headers, timeout: 30000 });
+            projRes.data.forEach(p => {
+                projectCategoryMap[p.key] = p.projectCategory?.name || null;
+            });
+            sendEvent('progress', { percent: 5, status: `Found ${projRes.data.length} projects. Searching issues...`, issue: '' });
+        } catch (err) {
+            sendEvent('progress', { percent: 5, status: 'Could not fetch project categories, continuing...', issue: '' });
+        }
+
+        // 2. Search issues with JQL (paginated)
+        const effectiveJql = jql || 'worklogDate >= -30d';
+        let allIssues = [];
+        let startAt = 0;
+        const pageSize = 50;
+        let totalIssues = 0;
+
+        sendEvent('progress', { percent: 8, status: `Executing JQL: ${effectiveJql}`, issue: '' });
+
+        do {
+            const searchRes = await axios.get(`${baseUrl}/rest/api/2/search`, {
+                headers,
+                params: {
+                    jql: effectiveJql,
+                    startAt,
+                    maxResults: pageSize,
+                    fields: `summary,project,timetracking,parent,${effectiveEpicField}`
+                },
+                timeout: 60000
+            });
+
+            totalIssues = searchRes.data.total;
+            allIssues = allIssues.concat(searchRes.data.issues || []);
+            startAt += pageSize;
+
+            sendEvent('progress', {
+                percent: Math.min(10, 8 + Math.round((allIssues.length / Math.max(totalIssues, 1)) * 2)),
+                status: `Fetched ${allIssues.length} of ${totalIssues} issues...`,
+                issue: ''
+            });
+        } while (startAt < totalIssues);
+
+        if (allIssues.length === 0) {
+            sendEvent('complete', { rowCount: 0, message: 'No issues found with the given JQL query.' });
+            res.end();
+            return;
+        }
+
+        sendEvent('progress', { percent: 10, status: `Found ${allIssues.length} issues. Extracting worklogs...`, issue: '' });
+
+        // 3. Extract worklogs from each issue
+        const rows = [];
+        const startTime = Date.now();
+
+        for (let idx = 0; idx < allIssues.length; idx++) {
+            const issue = allIssues[idx];
+            const issueKey = issue.key;
+            const fields = issue.fields || {};
+            const project = fields.project || {};
+            const projectName = project.name || '';
+            const projectKey = project.key || '';
+            const projectCategory = projectCategoryMap[projectKey] || null;
+
+            // Epic handling
+            let epic = null;
+            if (fields[effectiveEpicField]) {
+                epic = fields[effectiveEpicField];
+            }
+            if (!epic && fields.parent) {
+                epic = fields.parent.key || null;
+            }
+
+            // Original estimate
+            let originalEstimate = null;
+            if (fields.timetracking?.originalEstimateSeconds) {
+                originalEstimate = Math.round((fields.timetracking.originalEstimateSeconds / 3600) * 100) / 100;
+            }
+
+            // Fetch worklogs for this issue
+            try {
+                const wlRes = await axios.get(`${baseUrl}/rest/api/2/issue/${issueKey}/worklog`, {
+                    headers,
+                    timeout: 30000
+                });
+
+                const worklogs = wlRes.data.worklogs || [];
+                for (const wl of worklogs) {
+                    rows.push({
+                        'Author': wl.author?.displayName || wl.author?.name || 'Unknown',
+                        'Project': projectName,
+                        'Issue': issueKey,
+                        'Epic': epic,
+                        'Original Estimate (hrs)': originalEstimate,
+                        'Project Category': projectCategory,
+                        'Date': (wl.started || '').split('T')[0],
+                        'Time Spent (hrs)': Math.round((wl.timeSpentSeconds / 3600) * 100) / 100
+                    });
+                }
+            } catch (wlErr) {
+                sendEvent('warning', { message: `Could not fetch worklogs for ${issueKey}: ${wlErr.message}` });
+            }
+
+            // Progress update (every issue or every 5 for large sets)
+            if (allIssues.length < 100 || idx % 5 === 0 || idx === allIssues.length - 1) {
+                const elapsed = (Date.now() - startTime) / 1000;
+                const avgTime = elapsed / (idx + 1);
+                const remaining = avgTime * (allIssues.length - idx - 1);
+                const percent = 10 + Math.round(((idx + 1) / allIssues.length) * 88);
+
+                sendEvent('progress', {
+                    percent,
+                    status: `Processing ${idx + 1}/${allIssues.length}`,
+                    issue: issueKey,
+                    eta: remaining > 60 ? `${(remaining / 60).toFixed(1)} min` : `${Math.round(remaining)}s`,
+                    rowsExtracted: rows.length
+                });
+            }
+        }
+
+        // 4. Store in projectState (same as CSV upload)
+        projectState.jiraDump = rows;
+        projectState.lastRefreshed = new Date().toISOString();
+
+        sendEvent('complete', {
+            rowCount: rows.length,
+            issueCount: allIssues.length,
+            message: `Extraction complete! ${rows.length} worklog entries from ${allIssues.length} issues.`
+        });
+
+        res.end();
+
+    } catch (error) {
+        const msg = error.response?.data?.errorMessages?.join(', ') || error.response?.data?.message || error.message;
+        sendEvent('error', { message: `Extraction failed: ${msg}` });
+        res.end();
+    }
+});
+
+// Legacy Jira Proxy Endpoint
 app.get('/api/jira/worklogs', async (req, res) => {
     const { JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN } = process.env;
     if (!JIRA_URL || !JIRA_EMAIL || !JIRA_API_TOKEN) {

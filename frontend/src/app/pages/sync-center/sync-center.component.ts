@@ -1,8 +1,9 @@
-import { Component, Output, EventEmitter } from '@angular/core';
+import { Component, Output, EventEmitter, OnDestroy, NgZone } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HeaderComponent } from '../../components/header/header.component';
 import { DataProcessingService } from '../../services/data-processing.service';
+import { FinanceApiService } from '../../services/finance-api.service';
 
 @Component({
     selector: 'app-sync-center',
@@ -34,7 +35,7 @@ import { DataProcessingService } from '../../services/data-processing.service';
       </div>
     </div>
 
-    <!-- Main Upload Grid replacing the legacy 2-file system -->
+    <!-- Main Upload Grid -->
     <div class="charts-layout" style="margin-top: 32px;">
         <div class="card" style="grid-column: span 2;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
@@ -50,14 +51,94 @@ import { DataProcessingService } from '../../services/data-processing.service';
 
             <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 24px;">
                 
-                <!-- 1. Dump -->
-                <div class="glass-panel" style="margin: 0;">
-                    <h4 style="margin-top: 0; font-weight: 700; display: flex; align-items: center; gap: 8px;">
-                        1. Financial Dump 
-                        <span *ngIf="files['dump']" class="status-dot active"></span>
-                    </h4>
-                    <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px;">Core P&L entries and financial extracts.</p>
-                    <input type="file" (change)="onFileSelected($event, 'dump')" accept=".csv, .xlsx, .xls" class="file-input">
+                <!-- 1. Jira Dump (CSV or API Toggle) -->
+                <div class="glass-panel jira-panel" style="margin: 0; grid-column: 1 / -1;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                        <h4 style="margin: 0; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+                            1. Jira Dump
+                            <span *ngIf="files['dump'] || jiraExtractComplete" class="status-dot active"></span>
+                        </h4>
+                        <div class="mode-toggle">
+                            <button [class.active]="jiraDumpMode === 'csv'" (click)="jiraDumpMode = 'csv'; resetJiraState()">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                                CSV Upload
+                            </button>
+                            <button [class.active]="jiraDumpMode === 'api'" (click)="jiraDumpMode = 'api'; resetJiraState()">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                                JIRA API
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- CSV Mode -->
+                    <div *ngIf="jiraDumpMode === 'csv'" style="margin-top: 16px;">
+                        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px;">Upload Jira worklog export as CSV or Excel.</p>
+                        <input type="file" (change)="onFileSelected($event, 'dump')" accept=".csv, .xlsx, .xls" class="file-input">
+                    </div>
+
+                    <!-- API Mode -->
+                    <div *ngIf="jiraDumpMode === 'api'" style="margin-top: 16px;">
+                        <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px;">Connect directly to your JIRA instance and extract worklogs via REST API.</p>
+                        
+                        <div class="jira-form">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>JIRA URL</label>
+                                    <input type="text" [(ngModel)]="jiraConfig.jiraUrl" placeholder="https://your-domain.atlassian.net" class="form-input">
+                                </div>
+                                <div class="form-group">
+                                    <label>Email</label>
+                                    <input type="email" [(ngModel)]="jiraConfig.email" placeholder="your-email@example.com" class="form-input">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label>API Token</label>
+                                    <input type="password" [(ngModel)]="jiraConfig.apiToken" placeholder="Your Atlassian API token" class="form-input">
+                                </div>
+                                <div class="form-group">
+                                    <label>Days Back</label>
+                                    <input type="number" [(ngModel)]="jiraConfig.daysBack" min="1" max="365" class="form-input">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group" style="flex: 1;">
+                                    <label>JQL Query <span style="color: var(--text-muted); font-weight: 400;">(auto-generated from days, or customize)</span></label>
+                                    <input type="text" [ngModel]="effectiveJql" (ngModelChange)="jiraConfig.customJql = $event" placeholder="worklogDate >= -30d" class="form-input">
+                                </div>
+                            </div>
+
+                            <div class="jira-actions">
+                                <button (click)="testJiraConnection()" [disabled]="jiraExtracting || jiraTesting" class="btn-outline">
+                                    {{ jiraTesting ? '⏳ Testing...' : '🔗 Test Connection' }}
+                                </button>
+                                <button (click)="extractJiraWorklogs()" [disabled]="jiraExtracting || jiraTesting" class="btn-primary-jira">
+                                    {{ jiraExtracting ? '⏳ Extracting...' : '🚀 Extract Worklogs' }}
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Status Messages -->
+                        <div *ngIf="jiraStatusMessage" class="jira-status" [class.success]="jiraStatusType === 'success'" [class.error]="jiraStatusType === 'error'" [class.info]="jiraStatusType === 'info'">
+                            {{ jiraStatusMessage }}
+                        </div>
+
+                        <!-- Progress Bar -->
+                        <div *ngIf="jiraExtracting || jiraExtractComplete" class="jira-progress-container">
+                            <div class="progress-header">
+                                <span class="progress-label">{{ jiraProgressStatus }}</span>
+                                <span class="progress-percent">{{ jiraProgressPercent }}%</span>
+                            </div>
+                            <div class="progress-bar-bg">
+                                <div class="progress-bar-fill" [style.width.%]="jiraProgressPercent" [class.complete]="jiraExtractComplete"></div>
+                            </div>
+                            <div class="progress-details" *ngIf="jiraExtracting">
+                                <span *ngIf="jiraCurrentIssue">Current: <strong>{{ jiraCurrentIssue }}</strong></span>
+                                <span *ngIf="jiraEta">ETA: <strong>{{ jiraEta }}</strong></span>
+                                <span *ngIf="jiraRowsExtracted > 0">Rows: <strong>{{ jiraRowsExtracted }}</strong></span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- 2. Resource List -->
@@ -124,10 +205,224 @@ import { DataProcessingService } from '../../services/data-processing.service';
         color: var(--text-primary);
         font-family: 'Inter', sans-serif;
         font-size: 0.85rem;
+        box-sizing: border-box;
+    }
+
+    /* Jira Panel - Wider */
+    .jira-panel {
+        background: linear-gradient(135deg, rgba(79, 70, 229, 0.04), rgba(129, 140, 248, 0.04));
+        border: 1px solid rgba(79, 70, 229, 0.15);
+    }
+
+    /* Mode Toggle */
+    .mode-toggle {
+        display: flex;
+        gap: 0;
+        background: rgba(0, 0, 0, 0.06);
+        border-radius: 8px;
+        padding: 3px;
+    }
+    .mode-toggle button {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 7px 14px;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--text-muted);
+        font-size: 0.82rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        font-family: 'Inter', sans-serif;
+    }
+    .mode-toggle button.active {
+        background: white;
+        color: #4f46e5;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        font-weight: 600;
+    }
+    .mode-toggle button:hover:not(.active) {
+        color: var(--text-primary);
+    }
+
+    /* Jira Form */
+    .jira-form {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+    }
+    .form-row {
+        display: flex;
+        gap: 14px;
+    }
+    .form-group {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+    }
+    .form-group label {
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+    .form-input {
+        width: 100%;
+        padding: 9px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.03);
+        color: var(--text-primary);
+        font-family: 'Inter', sans-serif;
+        font-size: 0.88rem;
+        transition: border-color 0.2s;
+        box-sizing: border-box;
+    }
+    .form-input:focus {
+        outline: none;
+        border-color: #4f46e5;
+        box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+    }
+
+    /* Jira Actions */
+    .jira-actions {
+        display: flex;
+        gap: 12px;
+        margin-top: 4px;
+    }
+    .btn-outline {
+        padding: 9px 18px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--text-primary);
+        font-family: 'Inter', sans-serif;
+        font-size: 0.85rem;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .btn-outline:hover:not(:disabled) {
+        background: rgba(0, 0, 0, 0.04);
+        border-color: #4f46e5;
+    }
+    .btn-outline:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+    .btn-primary-jira {
+        padding: 9px 20px;
+        border: none;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #4f46e5, #6366f1);
+        color: white;
+        font-family: 'Inter', sans-serif;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+        box-shadow: 0 2px 8px rgba(79, 70, 229, 0.3);
+    }
+    .btn-primary-jira:hover:not(:disabled) {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(79, 70, 229, 0.4);
+    }
+    .btn-primary-jira:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        transform: none;
+    }
+
+    /* Status Message */
+    .jira-status {
+        margin-top: 14px;
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        font-weight: 500;
+    }
+    .jira-status.success {
+        background: rgba(16, 185, 129, 0.1);
+        color: #059669;
+        border: 1px solid rgba(16, 185, 129, 0.2);
+    }
+    .jira-status.error {
+        background: rgba(239, 68, 68, 0.1);
+        color: #dc2626;
+        border: 1px solid rgba(239, 68, 68, 0.2);
+    }
+    .jira-status.info {
+        background: rgba(59, 130, 246, 0.1);
+        color: #2563eb;
+        border: 1px solid rgba(59, 130, 246, 0.2);
+    }
+
+    /* Progress Bar */
+    .jira-progress-container {
+        margin-top: 16px;
+        padding: 14px 16px;
+        background: rgba(0, 0, 0, 0.03);
+        border-radius: 10px;
+        border: 1px solid var(--border);
+    }
+    .progress-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+    }
+    .progress-label {
+        font-size: 0.82rem;
+        color: var(--text-primary);
+        font-weight: 500;
+    }
+    .progress-percent {
+        font-size: 0.85rem;
+        font-weight: 700;
+        color: #4f46e5;
+    }
+    .progress-bar-bg {
+        width: 100%;
+        height: 8px;
+        background: rgba(0, 0, 0, 0.08);
+        border-radius: 4px;
+        overflow: hidden;
+    }
+    .progress-bar-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #4f46e5, #818cf8);
+        border-radius: 4px;
+        transition: width 0.4s ease;
+    }
+    .progress-bar-fill.complete {
+        background: linear-gradient(90deg, #059669, #10b981);
+    }
+    .progress-details {
+        display: flex;
+        gap: 20px;
+        margin-top: 10px;
+        font-size: 0.8rem;
+        color: var(--text-muted);
+    }
+    .progress-details strong {
+        color: var(--text-primary);
+    }
+
+    @media (max-width: 768px) {
+        .form-row {
+            flex-direction: column;
+        }
+        .jira-actions {
+            flex-direction: column;
+        }
     }
     `]
 })
-export class SyncCenterComponent {
+export class SyncCenterComponent implements OnDestroy {
     @Output() toggleSidebar = new EventEmitter<void>();
 
     hasCachedData = false;
@@ -149,8 +444,63 @@ export class SyncCenterComponent {
         attendance: null
     };
 
-    constructor(private dataProc: DataProcessingService) {
+    // JIRA API Mode
+    jiraDumpMode: 'csv' | 'api' = 'csv';
+
+    jiraConfig = {
+        jiraUrl: 'https://careedge.atlassian.net',
+        email: 'aditya.kadam@careedge.in',
+        apiToken: '',
+        daysBack: 30,
+        customJql: ''
+    };
+
+    // JIRA state
+    jiraTesting = false;
+    jiraExtracting = false;
+    jiraExtractComplete = false;
+    jiraStatusMessage = '';
+    jiraStatusType: 'success' | 'error' | 'info' = 'info';
+    jiraProgressPercent = 0;
+    jiraProgressStatus = '';
+    jiraCurrentIssue = '';
+    jiraEta = '';
+    jiraRowsExtracted = 0;
+
+    private eventSource: EventSource | null = null;
+
+    constructor(
+        private dataProc: DataProcessingService,
+        private financeApi: FinanceApiService,
+        private ngZone: NgZone
+    ) {
         this.checkCacheStatus();
+    }
+
+    ngOnDestroy() {
+        this.closeEventSource();
+    }
+
+    get effectiveJql(): string {
+        return this.jiraConfig.customJql || `worklogDate >= -${this.jiraConfig.daysBack}d`;
+    }
+
+    resetJiraState() {
+        this.jiraStatusMessage = '';
+        this.jiraExtractComplete = false;
+        this.jiraProgressPercent = 0;
+        this.jiraProgressStatus = '';
+        this.jiraCurrentIssue = '';
+        this.jiraEta = '';
+        this.jiraRowsExtracted = 0;
+        this.closeEventSource();
+    }
+
+    private closeEventSource() {
+        if (this.eventSource) {
+            this.eventSource.close();
+            this.eventSource = null;
+        }
     }
 
     checkCacheStatus() {
@@ -177,19 +527,175 @@ export class SyncCenterComponent {
         }
     }
 
+    async testJiraConnection() {
+        if (!this.jiraConfig.jiraUrl || !this.jiraConfig.email || !this.jiraConfig.apiToken) {
+            this.jiraStatusMessage = 'Please fill in JIRA URL, Email, and API Token.';
+            this.jiraStatusType = 'error';
+            return;
+        }
+
+        this.jiraTesting = true;
+        this.jiraStatusMessage = '';
+
+        try {
+            const result = await this.financeApi.testJiraConnection({
+                jiraUrl: this.jiraConfig.jiraUrl,
+                email: this.jiraConfig.email,
+                apiToken: this.jiraConfig.apiToken
+            });
+            this.jiraStatusMessage = `✅ Connected as ${result.user} (${result.email}). Found ${result.projectCount} projects.`;
+            this.jiraStatusType = 'success';
+        } catch (err: any) {
+            this.jiraStatusMessage = `❌ ${err.error?.error || err.message || 'Connection failed'}`;
+            this.jiraStatusType = 'error';
+        } finally {
+            this.jiraTesting = false;
+        }
+    }
+
+    extractJiraWorklogs() {
+        if (!this.jiraConfig.jiraUrl || !this.jiraConfig.email || !this.jiraConfig.apiToken) {
+            this.jiraStatusMessage = 'Please fill in all JIRA credentials before extracting.';
+            this.jiraStatusType = 'error';
+            return;
+        }
+
+        this.jiraExtracting = true;
+        this.jiraExtractComplete = false;
+        this.jiraProgressPercent = 0;
+        this.jiraProgressStatus = 'Connecting to JIRA...';
+        this.jiraCurrentIssue = '';
+        this.jiraEta = '';
+        this.jiraRowsExtracted = 0;
+        this.jiraStatusMessage = '';
+        this.closeEventSource();
+
+        const url = this.financeApi.getJiraExtractUrl();
+        const body = {
+            jiraUrl: this.jiraConfig.jiraUrl,
+            email: this.jiraConfig.email,
+            apiToken: this.jiraConfig.apiToken,
+            jql: this.effectiveJql
+        };
+
+        // Use fetch with ReadableStream for SSE over POST
+        fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        }).then(response => {
+            if (!response.ok || !response.body) {
+                throw new Error('Failed to connect to extraction endpoint');
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            const readChunk = (): void => {
+                reader.read().then(({ done, value }) => {
+                    if (done) {
+                        this.ngZone.run(() => {
+                            if (!this.jiraExtractComplete) {
+                                this.jiraExtracting = false;
+                            }
+                        });
+                        return;
+                    }
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (line.startsWith('event: ')) {
+                            const eventType = line.substring(7).trim();
+                            // Next line should be data
+                            const dataIdx = lines.indexOf(line) + 1;
+                            if (dataIdx < lines.length && lines[dataIdx].startsWith('data: ')) {
+                                // Handled below
+                            }
+                        } else if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.substring(6));
+                                this.ngZone.run(() => this.handleSSEData(data));
+                            } catch (e) {
+                                // Skip malformed
+                            }
+                        }
+                    }
+
+                    readChunk();
+                }).catch(err => {
+                    this.ngZone.run(() => {
+                        this.jiraExtracting = false;
+                        this.jiraStatusMessage = `❌ Stream error: ${err.message}`;
+                        this.jiraStatusType = 'error';
+                    });
+                });
+            };
+
+            readChunk();
+        }).catch(err => {
+            this.ngZone.run(() => {
+                this.jiraExtracting = false;
+                this.jiraStatusMessage = `❌ ${err.message}`;
+                this.jiraStatusType = 'error';
+            });
+        });
+    }
+
+    private handleSSEData(data: any) {
+        if (data.percent !== undefined) {
+            // Progress event
+            this.jiraProgressPercent = data.percent;
+            this.jiraProgressStatus = data.status || '';
+            this.jiraCurrentIssue = data.issue || '';
+            this.jiraEta = data.eta || '';
+            this.jiraRowsExtracted = data.rowsExtracted || this.jiraRowsExtracted;
+        }
+
+        if (data.rowCount !== undefined && data.message) {
+            // Complete event
+            this.jiraExtracting = false;
+            this.jiraExtractComplete = true;
+            this.jiraProgressPercent = 100;
+            this.jiraProgressStatus = data.message;
+            this.jiraStatusMessage = `✅ ${data.message}`;
+            this.jiraStatusType = 'success';
+            this.jiraCurrentIssue = '';
+            this.jiraEta = '';
+            this.jiraRowsExtracted = data.rowCount;
+        }
+
+        if (data.message && !data.rowCount && data.rowCount !== 0 && !data.percent && data.percent !== 0) {
+            // Error or warning event
+            if (data.message.includes('failed') || data.message.includes('Error')) {
+                this.jiraExtracting = false;
+                this.jiraStatusMessage = `❌ ${data.message}`;
+                this.jiraStatusType = 'error';
+            }
+        }
+    }
+
     async generateReports() {
-        // Validate required files are present (decide which ones are stricly mandatory for a PoC)
-        if (!this.files['dump'] || !this.files['resourceList'] || !this.files['projectMaster'] || !this.files['attendance']) {
-            alert("Please upload at least the Dump, Resource List, Project Master, and HR Attendance to generate insights.");
+        // In API mode, we don't require the dump file (it was already sent to backend)
+        const dumpRequired = this.jiraDumpMode === 'csv' ? !!this.files['dump'] : this.jiraExtractComplete;
+
+        if (!dumpRequired || !this.files['resourceList'] || !this.files['projectMaster'] || !this.files['attendance']) {
+            const missing = [];
+            if (!dumpRequired) missing.push(this.jiraDumpMode === 'csv' ? 'Jira Dump (CSV)' : 'Jira Dump (extract first via API)');
+            if (!this.files['resourceList']) missing.push('Resource List');
+            if (!this.files['projectMaster']) missing.push('Project Master');
+            if (!this.files['attendance']) missing.push('HR Attendance');
+            alert(`Please provide: ${missing.join(', ')}`);
             return;
         }
 
         this.processing = true;
 
         try {
-            // Send the File objects to the DataProcessing service to parse via xlsx library
             await this.dataProc.processSyncWorkflow(this.files);
-
             this.checkCacheStatus();
 
             if (this.stats.defaulters > 0) {

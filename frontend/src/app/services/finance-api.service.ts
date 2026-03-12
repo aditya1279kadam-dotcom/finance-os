@@ -26,4 +26,18 @@ export class FinanceApiService {
   async getMetadata(): Promise<any> {
     return firstValueFrom(this.http.get(`${this.baseUrl}/metadata`));
   }
+
+  async testJiraConnection(config: { jiraUrl: string; email: string; apiToken: string }): Promise<any> {
+    return firstValueFrom(this.http.post(`${this.baseUrl}/jira/test-connection`, config));
+  }
+
+  async uploadJiraDump(file: File): Promise<any> {
+    const formData = new FormData();
+    formData.append('file', file);
+    return firstValueFrom(this.http.post(`${this.baseUrl}/upload/jiraDump`, formData));
+  }
+
+  getJiraExtractUrl(): string {
+    return `${this.baseUrl}/jira/extract`;
+  }
 }
