@@ -573,37 +573,41 @@ app.post('/api/jira/extract', async (req, res) => {
             sendEvent('progress', { percent: 5, status: 'Could not fetch project categories, continuing...', issue: '' });
         }
 
-        // 2. Search issues with JQL (paginated)
+        // 2. Search issues with JQL (paginated using nextPageToken)
         const effectiveJql = jql || 'worklogDate >= -30d';
         let allIssues = [];
-        let startAt = 0;
         const pageSize = 50;
-        let totalIssues = 0;
+        let nextPageToken = null;
+        let pageCount = 0;
 
         sendEvent('progress', { percent: 8, status: `Executing JQL: ${effectiveJql}`, issue: '' });
 
         do {
+            const params = {
+                jql: effectiveJql,
+                maxResults: pageSize,
+                fields: `summary,project,timetracking,parent,${effectiveEpicField}`
+            };
+            if (nextPageToken) {
+                params.nextPageToken = nextPageToken;
+            }
+
             const searchRes = await axios.get(`${baseUrl}/rest/api/3/search/jql`, {
                 headers,
-                params: {
-                    jql: effectiveJql,
-                    startAt,
-                    maxResults: pageSize,
-                    fields: `summary,project,timetracking,parent,${effectiveEpicField}`
-                },
+                params,
                 timeout: 60000
             });
 
-            totalIssues = searchRes.data.total;
             allIssues = allIssues.concat(searchRes.data.issues || []);
-            startAt += pageSize;
+            nextPageToken = searchRes.data.nextPageToken || null;
+            pageCount++;
 
             sendEvent('progress', {
-                percent: Math.min(10, 8 + Math.round((allIssues.length / Math.max(totalIssues, 1)) * 2)),
-                status: `Fetched ${allIssues.length} of ${totalIssues} issues...`,
+                percent: Math.min(10, 8 + pageCount),
+                status: `Fetched ${allIssues.length} issues so far (page ${pageCount})...`,
                 issue: ''
             });
-        } while (startAt < totalIssues);
+        } while (nextPageToken);
 
         if (allIssues.length === 0) {
             sendEvent('complete', { rowCount: 0, message: 'No issues found with the given JQL query.' });
@@ -709,7 +713,7 @@ app.get('/api/jira/worklogs', async (req, res) => {
     }
     try {
         const auth = Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64');
-        const response = await axios.get(`${JIRA_URL}/rest/api/3/search`, {
+        const response = await axios.get(`${JIRA_URL}/rest/api/3/search/jql`, {
             params: req.query,
             headers: { 'Authorization': `Basic ${auth}`, 'Accept': 'application/json' }
         });
