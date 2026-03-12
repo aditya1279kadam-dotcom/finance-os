@@ -31,10 +31,14 @@ export class FinanceApiService {
     return firstValueFrom(this.http.post(`${this.baseUrl}/jira/test-connection`, config));
   }
 
-  async uploadJiraDump(file: File): Promise<any> {
+  async uploadFile(type: string, file: File): Promise<any> {
     const formData = new FormData();
     formData.append('file', file);
-    return firstValueFrom(this.http.post(`${this.baseUrl}/upload/jiraDump`, formData));
+    return firstValueFrom(this.http.post(`${this.baseUrl}/upload/${type}`, formData));
+  }
+
+  async uploadJiraDump(file: File): Promise<any> {
+    return this.uploadFile('jiraDump', file);
   }
 
   getJiraExtractUrl(): string {
@@ -51,5 +55,19 @@ export class FinanceApiService {
 
   getJiraDefaultersExportUrl(): string {
     return `${this.baseUrl}/jira-defaulters`;
+  }
+
+  async syncAllFiles(files: { [key: string]: File | null }): Promise<any> {
+    const promises = Object.entries(files).map(([type, file]) => {
+      if (file) {
+        return this.uploadFile(type, file);
+      }
+      return Promise.resolve();
+    });
+    return Promise.all(promises);
+  }
+
+  async getSyncHealth(): Promise<any> {
+    return firstValueFrom(this.http.get(`${this.baseUrl}/sync-health`));
   }
 }

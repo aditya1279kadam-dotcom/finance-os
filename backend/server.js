@@ -846,6 +846,38 @@ app.get('/api/jira-defaulters', (req, res) => {
     }
 });
 
+// Health Status Endpoint for Dashboard KPIs
+app.get('/api/sync-health', (req, res) => {
+    try {
+        const unmatchedNames = attendanceState.matchingReport?.filter(r => !r.MatchMethod || r.MatchMethod === 'No Match') || [];
+        const qcFlags = attendanceState.matchingReport?.filter(r => r.QC_Flag && r.QC_Flag !== 'OK') || [];
+        
+        // Defaulters (Missing Hours) logic
+        const authorHours = {};
+        projectState.jiraDump.forEach(row => {
+            const author = (row['Author'] || 'Unknown').trim();
+            authorHours[author] = (authorHours[author] || 0) + (row['Time Spent (hrs)'] || 0);
+        });
+
+        let jiraDefaultersCount = 0;
+        Object.keys(authorHours).forEach(author => {
+            const normalizedAuthor = author.toLowerCase().trim();
+            const resource = projectState.resourceList.find(r => (r['Jira Name'] || r['Name'] || '').toLowerCase().trim() === normalizedAuthor);
+            let requiredHours = resource?.['Required Hours'] ? parseFloat(resource['Required Hours']) : 160;
+            if (authorHours[author] < requiredHours) jiraDefaultersCount++;
+        });
+
+        res.json({
+            actionRequiredCount: unmatchedNames.length + qcFlags.length,
+            jiraDefaultersCount: jiraDefaultersCount,
+            projectsCount: projectState.projectMaster.length,
+            resourcesCount: projectState.resourceList.length
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to get health status', details: err.message });
+    }
+});
+
 // Legacy Jira Proxy Endpoint
 app.get('/api/jira/worklogs', async (req, res) => {
     const { JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN } = process.env;

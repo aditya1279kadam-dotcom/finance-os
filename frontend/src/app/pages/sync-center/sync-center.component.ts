@@ -622,18 +622,22 @@ export class SyncCenterComponent implements OnDestroy {
         }
     }
 
-    checkCacheStatus() {
+    async checkCacheStatus() {
+        // Local state check
         const stored = localStorage.getItem('financeos_unified_db');
         if (stored) {
             this.hasCachedData = true;
-            try {
-                const db = JSON.parse(stored);
-                this.stats.projects = Object.keys(db.projects || {}).length;
-                this.stats.resources = Object.keys(db.resources || {}).length;
-                this.stats.defaulters = (db.missingProjects?.length || 0) + (db.missingResources?.length || 0);
-            } catch (e) {
-                console.error("Failed to parse cached DB", e);
-            }
+        }
+
+        // Sync with Backend health
+        try {
+            const health = await this.financeApi.getSyncHealth();
+            this.stats.projects = health.projectsCount || 0;
+            this.stats.resources = health.resourcesCount || 0;
+            this.stats.defaulters = health.actionRequiredCount || 0;
+            this.stats.jiraDefaultersCount = health.jiraDefaultersCount || 0;
+        } catch (e) {
+            console.error("Failed to fetch backend health stats", e);
         }
     }
 
@@ -827,7 +831,18 @@ export class SyncCenterComponent implements OnDestroy {
     async confirmAndGenerate() {
         if (!this.isVerified) return;
         this.showVerificationModal = false;
-        await this.generateReports();
+        
+        this.processing = true;
+        try {
+            // 1. Sync all files to backend so Excel exports are valid
+            await this.financeApi.syncAllFiles(this.files);
+            
+            // 2. Process locally for dashboards
+            await this.generateReports();
+        } catch (e: any) {
+            alert('Sync failed: ' + e.message);
+            this.processing = false;
+        }
     }
 
     async generateReports() {
@@ -848,7 +863,7 @@ export class SyncCenterComponent implements OnDestroy {
 
         try {
             await this.dataProc.processSyncWorkflow(this.files);
-            this.checkCacheStatus();
+            await this.checkCacheStatus(); // Refresh KPIs from backend after sync
 
             if (this.stats.defaulters > 0) {
                 alert(`Processing Complete! \nWarning: ${this.stats.defaulters} Action Required issues found! Check the flags above.`);
