@@ -512,12 +512,12 @@ app.post('/api/jira/test-connection', async (req, res) => {
     }
     try {
         const auth = Buffer.from(`${email}:${apiToken}`).toString('base64');
-        const response = await axios.get(`${jiraUrl.replace(/\/$/, '')}/rest/api/2/myself`, {
+        const response = await axios.get(`${jiraUrl.replace(/\/$/, '')}/rest/api/3/myself`, {
             headers: { 'Authorization': `Basic ${auth}`, 'Accept': 'application/json' },
             timeout: 15000
         });
         // Also fetch project count
-        const projectsRes = await axios.get(`${jiraUrl.replace(/\/$/, '')}/rest/api/2/project`, {
+        const projectsRes = await axios.get(`${jiraUrl.replace(/\/$/, '')}/rest/api/3/project`, {
             headers: { 'Authorization': `Basic ${auth}`, 'Accept': 'application/json' },
             timeout: 15000
         });
@@ -564,7 +564,7 @@ app.post('/api/jira/extract', async (req, res) => {
         // 1. Cache project categories
         const projectCategoryMap = {};
         try {
-            const projRes = await axios.get(`${baseUrl}/rest/api/2/project`, { headers, timeout: 30000 });
+            const projRes = await axios.get(`${baseUrl}/rest/api/3/project`, { headers, timeout: 30000 });
             projRes.data.forEach(p => {
                 projectCategoryMap[p.key] = p.projectCategory?.name || null;
             });
@@ -583,7 +583,7 @@ app.post('/api/jira/extract', async (req, res) => {
         sendEvent('progress', { percent: 8, status: `Executing JQL: ${effectiveJql}`, issue: '' });
 
         do {
-            const searchRes = await axios.get(`${baseUrl}/rest/api/2/search`, {
+            const searchRes = await axios.get(`${baseUrl}/rest/api/3/search/jql`, {
                 headers,
                 params: {
                     jql: effectiveJql,
@@ -643,7 +643,7 @@ app.post('/api/jira/extract', async (req, res) => {
 
             // Fetch worklogs for this issue
             try {
-                const wlRes = await axios.get(`${baseUrl}/rest/api/2/issue/${issueKey}/worklog`, {
+                const wlRes = await axios.get(`${baseUrl}/rest/api/3/issue/${issueKey}/worklog`, {
                     headers,
                     timeout: 30000
                 });
