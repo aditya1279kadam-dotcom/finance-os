@@ -40,4 +40,8 @@ export class FinanceApiService {
   getJiraExtractUrl(): string {
     return `${this.baseUrl}/jira/extract`;
   }
+
+  getJiraExportUrl(): string {
+    return `${this.baseUrl}/jira/export`;
+  }
 }

@@ -705,6 +705,24 @@ app.post('/api/jira/extract', async (req, res) => {
     }
 });
 
+// Export extracted JIRA data as CSV
+app.get('/api/jira/export', (req, res) => {
+    try {
+        if (!projectState.jiraDump || projectState.jiraDump.length === 0) {
+            return res.status(404).json({ error: 'No JIRA data available to export. Please extract first.' });
+        }
+        
+        const csv = Papa.unparse(projectState.jiraDump);
+        
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="Jira_Extract.csv"');
+        res.status(200).send(csv);
+    } catch (err) {
+        console.error('Jira Export Error:', err);
+        res.status(500).json({ error: 'Failed to export JIRA data', details: err.message });
+    }
+});
+
 // Legacy Jira Proxy Endpoint
 app.get('/api/jira/worklogs', async (req, res) => {
     const { JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN } = process.env;

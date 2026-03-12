@@ -115,6 +115,10 @@ import { FinanceApiService } from '../../services/finance-api.service';
                                 <button (click)="extractJiraWorklogs()" [disabled]="jiraExtracting || jiraTesting" class="btn-primary-jira">
                                     {{ jiraExtracting ? '⏳ Extracting...' : '🚀 Extract Worklogs' }}
                                 </button>
+                                <button *ngIf="jiraExtractComplete" (click)="downloadJiraCsv()" class="btn-outline" style="margin-left: auto; border-color: #10b981; color: #10b981;">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 4px; vertical-align: middle;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                                    Download CSV
+                                </button>
                             </div>
                         </div>
 
@@ -643,6 +647,13 @@ export class SyncCenterComponent implements OnDestroy {
                 this.jiraStatusType = 'error';
             });
         });
+    }
+
+    downloadJiraCsv() {
+        if (!this.jiraExtractComplete) return;
+        
+        const url = this.financeApi.getJiraExportUrl();
+        window.open(url, '_blank');
     }
 
     private handleSSEData(data: any) {
